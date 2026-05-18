@@ -1,0 +1,15 @@
+# Environment
+.env
+__pycache__/
+*.pyc
+.python-version
+
+# Data (never commit vectors or uploads)
+docs/
+uploaded_pwf/
+qdrant_data/
+total_rag/
+
+# OS
+.DS_Store
+Thumbs.db

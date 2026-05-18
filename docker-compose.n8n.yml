@@ -1,0 +1,19 @@
+version: "3.8"
+services:
+  n8n_sin:
+    image: n8nio/n8n:latest
+    container_name: n8n_sin_chatbot
+    restart: unless-stopped
+    ports:
+      - "5679:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5679/
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+    volumes:
+      - n8n_sin_data:/home/node/.n8n
+
+volumes:
+  n8n_sin_data:
