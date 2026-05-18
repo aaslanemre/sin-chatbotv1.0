@@ -113,55 +113,88 @@ if st.session_state.pwf_files:
                     st.session_state.pwf_files.pop(i)
                     st.rerun()
 
-# ── Input bar ─────────────────────────────────────────────────────────────────
-input_col, clip_col, results_col = st.columns([8, 1, 1])
+# ── Bottom padding so messages aren't hidden behind fixed input bar ───────────
+st.markdown("""
+<style>
+.stChatMessage {
+    padding-bottom: 120px;
+}
+</style>
+""", unsafe_allow_html=True)
 
-with clip_col:
-    with st.popover("📎", help="Anexar arquivo .pwf"):
-        st.caption("Upload de arquivo de cenário (.pwf)")
-        uploaded_pwf = st.file_uploader(
-            "Selecionar arquivo",
-            type=["pwf"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-        if uploaded_pwf:
-            from utils.pwf_handler import save_pwf
-            from memory.persistent_memory import save_study
-            for f in uploaded_pwf:
-                if f.name not in [p["name"] for p in st.session_state.pwf_files]:
-                    path = save_pwf(f)
-                    st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
-                    st.session_state.study.pwf_files.append(f.name)
-                    save_study(st.session_state.study)
-                    st.success(f"✅ {f.name}")
-                    st.rerun()
+# ── Fixed bottom bar (CSS) ────────────────────────────────────────────────────
+st.markdown("""
+<style>
+.stChatInput {
+    position: fixed;
+    bottom: 1rem;
+    width: calc(100% - 4rem);
+    max-width: 736px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999;
+    background: var(--background-color);
+}
+section[data-testid="stBottom"] {
+    position: fixed;
+    bottom: 0;
+    width: 100%;
+    background: var(--background-color);
+    padding: 0.5rem 0;
+    z-index: 998;
+}
+</style>
+""", unsafe_allow_html=True)
 
-with results_col:
-    with st.popover("📊", help="Upload arquivo de resultados do Anarede"):
-        st.caption("Upload do arquivo de saída do Anarede")
-        results_file = st.file_uploader(
-            "Arquivo de resultados",
-            type=["txt", "res", "lst", "out"],
-            label_visibility="collapsed",
-        )
-        if results_file:
-            from agents.results_analyzer import save_results_file, check_convergence, format_results_report
-            from memory.persistent_memory import save_study
-            rpath = save_results_file(results_file, results_file.name)
-            analysis = check_convergence(rpath)
-            report = format_results_report(analysis)
-            st.session_state.study.last_convergence = analysis["converged"]
-            save_study(st.session_state.study)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"**Análise do arquivo de resultados:**\n\n{report}",
-                "sources": [],
-            })
-            st.rerun()
+# ── Upload popovers + chat input ──────────────────────────────────────────────
+with st.container():
+    col1, col2, col3 = st.columns([1, 1, 10])
 
-with input_col:
-    prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
+    with col1:
+        with st.popover("📎", help="Anexar arquivo .pwf"):
+            st.caption("Upload de arquivo de cenário (.pwf)")
+            uploaded_pwf = st.file_uploader(
+                "Selecionar arquivo",
+                type=["pwf"],
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+            )
+            if uploaded_pwf:
+                from utils.pwf_handler import save_pwf
+                from memory.persistent_memory import save_study
+                for f in uploaded_pwf:
+                    if f.name not in [p["name"] for p in st.session_state.pwf_files]:
+                        path = save_pwf(f)
+                        st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
+                        st.session_state.study.pwf_files.append(f.name)
+                        save_study(st.session_state.study)
+                        st.success(f"✅ {f.name}")
+                        st.rerun()
+
+    with col2:
+        with st.popover("📊", help="Upload resultado Anarede"):
+            st.caption("Upload do arquivo de saída do Anarede")
+            results_file = st.file_uploader(
+                "Arquivo de resultados",
+                type=["txt", "res", "lst", "out"],
+                label_visibility="collapsed",
+            )
+            if results_file:
+                from agents.results_analyzer import save_results_file, check_convergence, format_results_report
+                from memory.persistent_memory import save_study
+                rpath = save_results_file(results_file, results_file.name)
+                analysis = check_convergence(rpath)
+                report = format_results_report(analysis)
+                st.session_state.study.last_convergence = analysis["converged"]
+                save_study(st.session_state.study)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": f"**Análise do arquivo de resultados:**\n\n{report}",
+                    "sources": [],
+                })
+                st.rerun()
+
+prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
 
 # ── Handle chat input ─────────────────────────────────────────────────────────
 if prompt:
