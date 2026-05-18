@@ -39,6 +39,9 @@ if "pwf_files" not in st.session_state:
 if "modified_pwf_path" not in st.session_state:
     st.session_state.modified_pwf_path = None
 
+if "last_uploaded_results" not in st.session_state:
+    st.session_state.last_uploaded_results = None
+
 
 def _load_chain():
     try:
@@ -66,22 +69,36 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     if uploaded_pwf:
-        for f in uploaded_pwf:
-            if f.name not in [p["name"] for p in st.session_state.pwf_files]:
-                path = save_pwf(f)
-                st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
-                st.session_state.study.pwf_files.append(f.name)
+        if st.button("📤 Confirmar upload PWF", use_container_width=True, type="primary"):
+            newly_added = []
+            for f in uploaded_pwf:
+                if f.name not in [p["name"] for p in st.session_state.pwf_files]:
+                    path = save_pwf(f)
+                    st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
+                    st.session_state.study.pwf_files.append(f.name)
+                    newly_added.append(f.name)
+            if newly_added:
                 save_study(st.session_state.study)
+                for name in newly_added:
+                    st.toast(f"✅ {name} carregado com sucesso!", icon="✅")
                 st.rerun()
+            else:
+                st.toast("Arquivo já estava carregado.", icon="ℹ️")
 
-    for i, pwf in enumerate(st.session_state.pwf_files):
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.caption(f"📎 {pwf['name']}")
-        with col2:
-            if st.button("✕", key=f"rm_{i}", help="Remover"):
-                st.session_state.pwf_files.pop(i)
-                st.rerun()
+    if st.session_state.pwf_files:
+        st.caption("**Arquivos carregados:**")
+        for i, pwf in enumerate(st.session_state.pwf_files):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.success(f"✓ {pwf['name']}")
+            with col2:
+                if st.button("✕", key=f"rm_{i}", help="Remover"):
+                    st.session_state.pwf_files.pop(i)
+                    st.session_state.study.pwf_files = [
+                        p["name"] for p in st.session_state.pwf_files
+                    ]
+                    save_study(st.session_state.study)
+                    st.rerun()
 
     st.divider()
 
@@ -91,18 +108,25 @@ with st.sidebar:
         type=["txt", "res", "lst", "out"],
         label_visibility="collapsed",
     )
-    if results_file:
-        rpath = save_results_file(results_file, results_file.name)
-        analysis = check_convergence(rpath)
-        report = format_results_report(analysis)
-        st.session_state.study.last_convergence = analysis["converged"]
-        save_study(st.session_state.study)
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": f"**Análise do arquivo de resultados:**\n\n{report}",
-            "sources": [],
-        })
-        st.rerun()
+    if results_file and results_file.name != st.session_state.last_uploaded_results:
+        if st.button("📤 Analisar resultados", use_container_width=True, type="primary"):
+            with st.spinner("Analisando arquivo..."):
+                rpath = save_results_file(results_file, results_file.name)
+                analysis = check_convergence(rpath)
+                report = format_results_report(analysis)
+                st.session_state.study.last_convergence = analysis["converged"]
+                save_study(st.session_state.study)
+            if analysis["converged"]:
+                st.toast("✅ Simulação convergiu!", icon="✅")
+            else:
+                st.toast("❌ Simulação não convergiu.", icon="❌")
+            st.session_state.last_uploaded_results = results_file.name
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"**Análise do arquivo de resultados:**\n\n{report}",
+                "sources": [],
+            })
+            st.rerun()
 
     if st.session_state.get("modified_pwf_path"):
         p = Path(st.session_state.modified_pwf_path)
