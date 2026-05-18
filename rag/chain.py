@@ -10,8 +10,8 @@ class SINChain:
     """
     Conversational RAG chain using LCEL.
     Keeps last 10 turns (20 messages) in memory.
-    Interface mirrors the old ConversationalRetrievalChain:
-      chain.invoke({"question": ...}) → {"answer": ..., "source_documents": [...]}
+    Interface: chain.invoke({"question": ..., "study_context": ...})
+               → {"answer": ..., "source_documents": [...]}
     """
 
     def __init__(self):
@@ -31,12 +31,14 @@ class SINChain:
 
     def invoke(self, inputs: dict) -> dict:
         question = inputs["question"]
+        study_context = inputs.get("study_context", "No study context defined yet.")
 
         # Retrieve relevant chunks
         docs = self.retriever.invoke(question)
         context = "\n\n".join(doc.page_content for doc in docs)
 
         messages = self._prompt.format_messages(
+            study_context=study_context,
             context=context,
             chat_history=self.chat_history,
             question=question,

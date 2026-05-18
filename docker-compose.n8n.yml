@@ -14,6 +14,7 @@ services:
       - GENERIC_TIMEZONE=America/Sao_Paulo
     volumes:
       - n8n_sin_data:/home/node/.n8n
+      - ./docs:/docs
 
 volumes:
   n8n_sin_data:

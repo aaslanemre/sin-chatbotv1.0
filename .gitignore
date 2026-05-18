@@ -5,10 +5,18 @@ __pycache__/
 .python-version
 
 # Data (never commit vectors or uploads)
-docs/
+docs/incoming/
+docs/processed/
 uploaded_pwf/
 qdrant_data/
 total_rag/
+
+# Generated files
+modified_pwf/
+results/
+
+# Memory store (may contain study details)
+memory_store/
 
 # OS
 .DS_Store

@@ -1,11 +1,7 @@
 import streamlit as st
-from utils.pwf_handler import save_pwf, preview_pwf
+from pathlib import Path
 
-st.set_page_config(
-    page_title="Assistente SIN",
-    page_icon="⚡",
-    layout="centered",
-)
+st.set_page_config(page_title="Assistente SIN", page_icon="⚡", layout="centered")
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "chain" not in st.session_state:
@@ -17,16 +13,23 @@ if "messages" not in st.session_state:
         {
             "role": "assistant",
             "content": (
-                "Olá! Sou seu assistente especialista no Sistema Interligado Nacional. "
-                "Posso ajudá-lo a conduzir estudos de localização de BESS, STATCOM, "
-                "HVDC, fluxo de potência, estabilidade e muito mais.\n\n"
+                "Olá! Sou seu assistente especialista no Sistema Interligado Nacional.\n\n"
+                "Posso ajudá-lo a conduzir estudos de localização de BESS, STATCOM, HVDC, "
+                "fluxo de potência e estabilidade com o Anarede, Anatem e Plexos.\n\n"
                 "Como posso ajudá-lo hoje?"
             ),
         }
     ]
 
+if "study" not in st.session_state:
+    from memory.persistent_memory import load_study
+    st.session_state.study = load_study()
+
 if "pwf_files" not in st.session_state:
     st.session_state.pwf_files = []
+
+if "modified_pwf_path" not in st.session_state:
+    st.session_state.modified_pwf_path = None
 
 
 def _load_chain():
@@ -49,11 +52,16 @@ with col1:
     st.markdown("### ⚡ Assistente SIN")
     st.caption("Planejamento e operação do Sistema Interligado Nacional")
 with col2:
-    if st.button("🗑️ Limpar", help="Limpar conversa"):
+    if st.button("🗑️ Limpar", help="Limpar conversa e memória"):
+        from memory.session_memory import StudyState
+        from memory.persistent_memory import clear_study
         st.session_state.messages = [st.session_state.messages[0]]
         st.session_state.pwf_files = []
+        st.session_state.modified_pwf_path = None
+        st.session_state.study = StudyState()
         st.session_state.chain = None
         st.session_state.chain_error = None
+        clear_study()
         st.rerun()
 
 st.divider()
@@ -81,19 +89,32 @@ for msg in st.session_state.messages:
                 for src in msg["sources"]:
                     st.caption(f"• {src}")
 
+# ── Modified PWF download ─────────────────────────────────────────────────────
+if st.session_state.modified_pwf_path:
+    p = Path(st.session_state.modified_pwf_path)
+    if p.exists():
+        st.success(f"Arquivo PWF modificado gerado: `{p.name}`")
+        st.download_button(
+            label="⬇️ Baixar PWF modificado",
+            data=p.read_bytes(),
+            file_name=p.name,
+            mime="application/octet-stream",
+        )
+
 # ── PWF chips (above input) ───────────────────────────────────────────────────
 if st.session_state.pwf_files:
-    chip_cols = st.columns(len(st.session_state.pwf_files) + 1)
+    cols = st.columns(min(len(st.session_state.pwf_files), 3))
     for i, pwf in enumerate(st.session_state.pwf_files):
-        with chip_cols[i]:
+        with cols[i % 3]:
             with st.expander(f"📎 {pwf['name']}"):
-                st.code(preview_pwf(pwf["path"]), language="text")
-                if st.button("Remover", key=f"remove_{i}"):
+                from agents.pwf_agent import preview_pwf
+                st.code(preview_pwf(Path(pwf["path"])), language="text")
+                if st.button("Remover", key=f"rm_{i}"):
                     st.session_state.pwf_files.pop(i)
                     st.rerun()
 
-# ── Input bar with paperclip popover ─────────────────────────────────────────
-clip_col, input_col = st.columns([1, 10])
+# ── Input bar ─────────────────────────────────────────────────────────────────
+input_col, clip_col, results_col = st.columns([8, 1, 1])
 
 with clip_col:
     with st.popover("📎", help="Anexar arquivo .pwf"):
@@ -105,12 +126,39 @@ with clip_col:
             label_visibility="collapsed",
         )
         if uploaded_pwf:
+            from utils.pwf_handler import save_pwf
+            from memory.persistent_memory import save_study
             for f in uploaded_pwf:
                 if f.name not in [p["name"] for p in st.session_state.pwf_files]:
                     path = save_pwf(f)
-                    st.session_state.pwf_files.append({"name": f.name, "path": path})
-                    st.success(f"✅ {f.name} carregado")
+                    st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
+                    st.session_state.study.pwf_files.append(f.name)
+                    save_study(st.session_state.study)
+                    st.success(f"✅ {f.name}")
                     st.rerun()
+
+with results_col:
+    with st.popover("📊", help="Upload arquivo de resultados do Anarede"):
+        st.caption("Upload do arquivo de saída do Anarede")
+        results_file = st.file_uploader(
+            "Arquivo de resultados",
+            type=["txt", "res", "lst", "out"],
+            label_visibility="collapsed",
+        )
+        if results_file:
+            from agents.results_analyzer import save_results_file, check_convergence, format_results_report
+            from memory.persistent_memory import save_study
+            rpath = save_results_file(results_file, results_file.name)
+            analysis = check_convergence(rpath)
+            report = format_results_report(analysis)
+            st.session_state.study.last_convergence = analysis["converged"]
+            save_study(st.session_state.study)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"**Análise do arquivo de resultados:**\n\n{report}",
+                "sources": [],
+            })
+            st.rerun()
 
 with input_col:
     prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
@@ -120,8 +168,9 @@ if prompt:
     pwf_context = ""
     if st.session_state.pwf_files:
         names = ", ".join(p["name"] for p in st.session_state.pwf_files)
-        pwf_context = f"\n\n[Arquivos PWF carregados pelo usuário: {names}]"
+        pwf_context = f"\n\n[Arquivos PWF carregados: {names}]"
 
+    study_context = st.session_state.study.summary()
     full_prompt = prompt + pwf_context
 
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -139,7 +188,10 @@ if prompt:
         else:
             with st.spinner("Consultando base de conhecimento..."):
                 try:
-                    result = st.session_state.chain.invoke({"question": full_prompt})
+                    result = st.session_state.chain.invoke({
+                        "question": full_prompt,
+                        "study_context": study_context,
+                    })
                     answer = result["answer"]
                     sources = list({
                         doc.metadata.get("source", "desconhecido")
@@ -163,3 +215,7 @@ if prompt:
         "content": answer,
         "sources": sources,
     })
+
+    # Auto-save study state
+    from memory.persistent_memory import save_study
+    save_study(st.session_state.study)

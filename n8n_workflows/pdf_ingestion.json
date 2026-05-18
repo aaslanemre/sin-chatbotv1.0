@@ -1,0 +1,114 @@
+{
+  "name": "SIN PDF Auto-Ingestion",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "seconds", "secondsInterval": 30 }]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Poll every 30s",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "command": "find /docs/incoming -maxdepth 1 -name '*.pdf' -o -name '*.PDF' | head -20"
+      },
+      "id": "find-pdfs",
+      "name": "Find new PDFs",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.stdout.trim() }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "check-files",
+      "name": "Any PDFs found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "code": "const output = $input.first().json.stdout.trim();\nconst files = output.split('\\n').filter(f => f.length > 0);\nreturn files.map(f => ({ json: { file_path: f.trim() } }));"
+      },
+      "id": "split-files",
+      "name": "Split into individual files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:8001/ingest",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "file_path",
+              "value": "={{ $json.file_path }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "call-ingest-api",
+      "name": "Call Ingestion API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 220]
+    },
+    {
+      "parameters": {
+        "code": "const result = $input.first().json;\nconst status = result.status || 'unknown';\nconst file = result.file || 'unknown';\nconst chunks = result.chunks || 0;\nconst ts = new Date().toISOString();\nconsole.log(`[${ts}] ${status.toUpperCase()}: ${file} (${chunks} chunks)`);\nreturn [{ json: { ...result, logged_at: ts } }];"
+      },
+      "id": "log-result",
+      "name": "Log result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 220]
+    }
+  ],
+  "connections": {
+    "Poll every 30s": {
+      "main": [[{ "node": "Find new PDFs", "type": "main", "index": 0 }]]
+    },
+    "Find new PDFs": {
+      "main": [[{ "node": "Any PDFs found?", "type": "main", "index": 0 }]]
+    },
+    "Any PDFs found?": {
+      "main": [
+        [{ "node": "Split into individual files", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split into individual files": {
+      "main": [[{ "node": "Call Ingestion API", "type": "main", "index": 0 }]]
+    },
+    "Call Ingestion API": {
+      "main": [[{ "node": "Log result", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["sin-chatbot", "rag", "ingestion"],
+  "triggerCount": 0,
+  "updatedAt": "2026-05-18T00:00:00.000Z",
+  "versionId": "v2.1"
+}
