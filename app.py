@@ -113,46 +113,36 @@ if st.session_state.pwf_files:
                     st.session_state.pwf_files.pop(i)
                     st.rerun()
 
-# ── Bottom padding so messages aren't hidden behind fixed input bar ───────────
+# ── CSS: pin parent container of chat input + add message padding ─────────────
 st.markdown("""
 <style>
-.stChatMessage {
-    padding-bottom: 120px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ── Fixed bottom bar (CSS) ────────────────────────────────────────────────────
-st.markdown("""
-<style>
-.stChatInput {
-    position: fixed;
-    bottom: 1rem;
-    width: calc(100% - 4rem);
-    max-width: 736px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 999;
-    background: var(--background-color);
-}
-section[data-testid="stBottom"] {
+/* Pin the entire block containing the chat input (icons + input together) */
+div[data-testid="stVerticalBlock"]:has(div[data-testid="stChatInput"]) {
     position: fixed;
     bottom: 0;
-    width: 100%;
-    background: var(--background-color);
-    padding: 0.5rem 0;
-    z-index: 998;
+    left: 50%;
+    transform: translateX(-50%);
+    width: calc(100% - 4rem);
+    max-width: 736px;
+    background-color: var(--background-color);
+    padding: 0.75rem 0 1rem 0;
+    z-index: 999;
+}
+
+/* Add padding to chat area so last message isn't hidden behind fixed bar */
+[data-testid="stChatMessageContainer"] {
+    padding-bottom: 100px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Upload popovers + chat input ──────────────────────────────────────────────
-with st.container():
-    col1, col2, col3 = st.columns([1, 1, 10])
+# ── Bottom bar: icons + chat input pinned together ────────────────────────────
+bottom = st.container()
+with bottom:
+    icon_col, input_col = st.columns([1, 11])
 
-    with col1:
-        with st.popover("📎", help="Anexar arquivo .pwf"):
-            st.caption("Upload de arquivo de cenário (.pwf)")
+    with icon_col:
+        with st.popover("📎", help="Anexar .pwf"):
             uploaded_pwf = st.file_uploader(
                 "Selecionar arquivo",
                 type=["pwf"],
@@ -171,9 +161,7 @@ with st.container():
                         st.success(f"✅ {f.name}")
                         st.rerun()
 
-    with col2:
-        with st.popover("📊", help="Upload resultado Anarede"):
-            st.caption("Upload do arquivo de saída do Anarede")
+        with st.popover("📊", help="Resultado Anarede"):
             results_file = st.file_uploader(
                 "Arquivo de resultados",
                 type=["txt", "res", "lst", "out"],
@@ -194,7 +182,11 @@ with st.container():
                 })
                 st.rerun()
 
-prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
+    with input_col:
+        prompt = st.chat_input(
+            "Digite sua pergunta sobre o SIN...",
+            key="chat_input",
+        )
 
 # ── Handle chat input ─────────────────────────────────────────────────────────
 if prompt:
