@@ -6,7 +6,7 @@ from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 
 st.set_page_config(
-    page_title="Assistente SIN",
+    page_title="Assistente SIN v3.0",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -23,8 +23,10 @@ if "messages" not in st.session_state:
             "role": "assistant",
             "content": (
                 "Olá! Sou seu assistente especialista no Sistema Interligado Nacional.\n\n"
-                "Posso ajudá-lo a conduzir estudos de localização de BESS, STATCOM, HVDC, "
-                "fluxo de potência e estabilidade com o Anarede, Anatem e Plexos.\n\n"
+                "Você pode me fazer perguntas técnicas sobre o SIN, BESS, STATCOM, "
+                "HVDC, cenários de operação, fluxo de potência e muito mais.\n\n"
+                "Se quiser realizar um estudo de simulação com o Anarede, é só me dizer "
+                "e eu te guio pelo processo completo.\n\n"
                 "Como posso ajudá-lo hoje?"
             ),
         }
@@ -35,6 +37,9 @@ if "study" not in st.session_state:
 
 if "pwf_files" not in st.session_state:
     st.session_state.pwf_files = []
+
+if "simulation_mode" not in st.session_state:
+    st.session_state.simulation_mode = False
 
 if "modified_pwf_path" not in st.session_state:
     st.session_state.modified_pwf_path = None
@@ -59,8 +64,15 @@ if st.session_state.chain is None and st.session_state.chain_error is None:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### Arquivos")
+    # Mode indicator
+    if st.session_state.simulation_mode:
+        st.success("🔬 Modo: Guia de Simulação")
+    else:
+        st.info("💬 Modo: Conversa Livre")
 
+    st.divider()
+
+    # PWF upload
     st.caption("**Cenários PWF**")
     uploaded_pwf = st.file_uploader(
         "Selecionar arquivo .pwf",
@@ -80,7 +92,7 @@ with st.sidebar:
             if newly_added:
                 save_study(st.session_state.study)
                 for name in newly_added:
-                    st.toast(f"✅ {name} carregado com sucesso!", icon="✅")
+                    st.toast(f"✅ {name} carregado!", icon="✅")
                 st.rerun()
             else:
                 st.toast("Arquivo já estava carregado.", icon="ℹ️")
@@ -102,6 +114,7 @@ with st.sidebar:
 
     st.divider()
 
+    # Results upload
     st.caption("**Resultados Anarede**")
     results_file = st.file_uploader(
         "Arquivo de saída do Anarede",
@@ -116,11 +129,11 @@ with st.sidebar:
                 report = format_results_report(analysis)
                 st.session_state.study.last_convergence = analysis["converged"]
                 save_study(st.session_state.study)
+                st.session_state.last_uploaded_results = results_file.name
             if analysis["converged"]:
                 st.toast("✅ Simulação convergiu!", icon="✅")
             else:
                 st.toast("❌ Simulação não convergiu.", icon="❌")
-            st.session_state.last_uploaded_results = results_file.name
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": f"**Análise do arquivo de resultados:**\n\n{report}",
@@ -128,7 +141,8 @@ with st.sidebar:
             })
             st.rerun()
 
-    if st.session_state.get("modified_pwf_path"):
+    # Modified PWF download
+    if st.session_state.modified_pwf_path:
         p = Path(st.session_state.modified_pwf_path)
         if p.exists():
             st.divider()
@@ -142,10 +156,10 @@ with st.sidebar:
 
     st.divider()
     if st.button("🗑️ Limpar conversa", use_container_width=True):
-        from rag.chain import build_chain
         st.session_state.messages = [st.session_state.messages[0]]
         st.session_state.pwf_files = []
         st.session_state.modified_pwf_path = None
+        st.session_state.simulation_mode = False
         st.session_state.study = StudyState()
         st.session_state.chain = None
         st.session_state.chain_error = None
@@ -153,19 +167,21 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption("Documentos indexados: ONS PAR/PEL 2025, EPE PDE 2035, Manuais ANAREDE/ANATEM")
+    st.caption("v3.0 experimental")
+    st.caption("Documentos: ONS PAR/PEL 2025, EPE PDE 2035, Manuais ANAREDE/ANATEM")
 
-# ── Title ─────────────────────────────────────────────────────────────────────
-st.title("⚡ Assistente SIN")
+# ── Main area ─────────────────────────────────────────────────────────────────
+st.markdown("### ⚡ Assistente SIN")
 st.caption("Planejamento e operação do Sistema Interligado Nacional")
+st.divider()
 
-# ── Connection error banner ───────────────────────────────────────────────────
+# Connection error banner
 if st.session_state.chain_error:
     st.error(
         "**Não foi possível conectar ao Qdrant ou Ollama.**\n\n"
         f"Detalhes: `{st.session_state.chain_error}`\n\n"
         "Verifique se:\n"
-        "- Qdrant está rodando: `docker-compose up -d`\n"
+        "- Qdrant v3 está rodando: `docker-compose -f docker-compose.v3.yml up -d`\n"
         "- Ollama está rodando: `ollama serve`\n"
         "- Modelos baixados: `ollama pull llama3.2 && ollama pull nomic-embed-text`"
     )
@@ -173,7 +189,7 @@ if st.session_state.chain_error:
         st.session_state.chain_error = None
         st.rerun()
 
-# ── Chat messages ─────────────────────────────────────────────────────────────
+# Chat messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -182,11 +198,20 @@ for msg in st.session_state.messages:
                 for src in msg["sources"]:
                     st.caption(f"• {src}")
 
-# ── Chat input ────────────────────────────────────────────────────────────────
+# Chat input
 prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
 
-# ── Handle chat input ─────────────────────────────────────────────────────────
+# ── Handle input ──────────────────────────────────────────────────────────────
 if prompt:
+    # Detect simulation intent to update mode indicator
+    simulation_keywords = [
+        "sim", "quero", "vamos", "pode me guiar", "guia", "iniciar",
+        "rodar", "executar", "simular", "anarede", "pwf", "sav",
+        "fluxo de potência", "estudo", "contingência",
+    ]
+    if any(kw in prompt.lower() for kw in simulation_keywords):
+        st.session_state.simulation_mode = True
+
     pwf_context = ""
     if st.session_state.pwf_files:
         names = ", ".join(p["name"] for p in st.session_state.pwf_files)

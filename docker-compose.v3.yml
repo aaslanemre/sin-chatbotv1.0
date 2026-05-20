@@ -1,0 +1,31 @@
+version: "3.8"
+services:
+  qdrant_v3:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_sin_v3
+    restart: unless-stopped
+    ports:
+      - "6335:6333"
+      - "6336:6334"
+    volumes:
+      - qdrant_v3_data:/qdrant/storage
+
+  n8n_v3:
+    image: n8nio/n8n:latest
+    container_name: n8n_sin_v3
+    restart: unless-stopped
+    ports:
+      - "5680:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5680/
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+    volumes:
+      - n8n_v3_data:/home/node/.n8n
+      - ./docs:/docs
+
+volumes:
+  qdrant_v3_data:
+  n8n_v3_data:

@@ -2,18 +2,29 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from config.settings import (
     OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL,
-    QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION, TOP_K
+    QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION,
+    TOP_K, SIMILARITY_THRESHOLD,
 )
 
 
 def get_retriever():
     embeddings = OllamaEmbeddings(
         base_url=OLLAMA_BASE_URL,
-        model=OLLAMA_EMBED_MODEL
+        model=OLLAMA_EMBED_MODEL,
     )
     vectorstore = QdrantVectorStore.from_existing_collection(
         embedding=embeddings,
         url=f"http://{QDRANT_HOST}:{QDRANT_PORT}",
         collection_name=QDRANT_COLLECTION,
     )
-    return vectorstore.as_retriever(search_kwargs={"k": TOP_K})
+
+    # Filter out low-relevance chunks — LLM receives empty context when nothing
+    # passes the threshold and must say it doesn't have the information.
+    retriever = vectorstore.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": TOP_K,
+            "score_threshold": SIMILARITY_THRESHOLD,
+        },
+    )
+    return retriever
