@@ -1,3 +1,5 @@
+import hashlib
+import importlib
 import streamlit as st
 from pathlib import Path
 from utils.pwf_handler import save_pwf
@@ -12,10 +14,23 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Reload prompt module to pick up any edits without full server restart
+import prompts.system_prompt as _spm
+importlib.reload(_spm)
+from prompts.system_prompt import SYSTEM_PROMPT as _CURRENT_PROMPT
+_prompt_hash = hashlib.md5(_CURRENT_PROMPT.encode()).hexdigest()
+
 # ── Session state ─────────────────────────────────────────────────────────────
 if "chain" not in st.session_state:
     st.session_state.chain = None
     st.session_state.chain_error = None
+    st.session_state._prompt_hash = None
+
+# Rebuild chain if system prompt has changed since chain was last built
+if st.session_state.get("_prompt_hash") != _prompt_hash:
+    st.session_state.chain = None
+    st.session_state.chain_error = None
+    st.session_state._prompt_hash = _prompt_hash
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -50,8 +65,9 @@ if "last_uploaded_results" not in st.session_state:
 
 def _load_chain():
     try:
-        from rag.chain import build_chain
-        st.session_state.chain = build_chain()
+        import rag.chain as _chain_mod
+        importlib.reload(_chain_mod)
+        st.session_state.chain = _chain_mod.build_chain()
         st.session_state.chain_error = None
     except Exception as e:
         st.session_state.chain = None
