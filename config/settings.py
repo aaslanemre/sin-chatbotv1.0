@@ -18,7 +18,7 @@ OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # Gemini settings
 GOOGLE_API_KEY     = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_CHAT_MODEL  = os.getenv("GEMINI_CHAT_MODEL", "gemini-1.5-flash")
+GEMINI_CHAT_MODEL  = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 
 # Qdrant - hardcoded correct values
