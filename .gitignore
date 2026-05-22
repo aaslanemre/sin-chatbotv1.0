@@ -1,5 +1,6 @@
-# Environment
+# Environment — never commit API keys
 .env
+.env.*
 __pycache__/
 *.pyc
 .python-version

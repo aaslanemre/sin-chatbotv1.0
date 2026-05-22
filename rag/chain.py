@@ -1,9 +1,30 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_ollama import ChatOllama
 from rag.retriever import get_retriever
 from prompts.system_prompt import SYSTEM_PROMPT
-from config.settings import OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL
+from config.settings import (
+    LLM_PROVIDER,
+    OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL,
+    GOOGLE_API_KEY, GEMINI_CHAT_MODEL,
+)
+
+
+def get_llm():
+    if LLM_PROVIDER == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=GEMINI_CHAT_MODEL,
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0.1,
+            convert_system_message_to_human=False,
+        )
+    else:
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            base_url=OLLAMA_BASE_URL,
+            model=OLLAMA_CHAT_MODEL,
+            temperature=0.1,
+        )
 
 
 class SINChain:
@@ -17,11 +38,7 @@ class SINChain:
     """
 
     def __init__(self):
-        self.llm = ChatOllama(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_CHAT_MODEL,
-            temperature=0.2,
-        )
+        self.llm = get_llm()
         self.retriever = get_retriever()
         self.chat_history: list = []
 

@@ -4,6 +4,8 @@ langchain-community
 langchain-ollama
 langchain-qdrant
 langchain-text-splitters
+langchain-google-genai
+google-generativeai
 qdrant-client
 pymupdf
 python-dotenv
