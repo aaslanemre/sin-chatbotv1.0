@@ -12,7 +12,6 @@ class StudyState:
     sin_area: Optional[str] = None
     technology: Optional[str] = None
     scenarios: List[str] = field(default_factory=list)
-    pwf_files: List[str] = field(default_factory=list)
     modification_needed: Optional[bool] = None
     contingencies: List[str] = field(default_factory=list)
     last_convergence: Optional[bool] = None
@@ -29,8 +28,6 @@ class StudyState:
             parts.append(f"SIN area: {self.sin_area}")
         if self.scenarios:
             parts.append(f"Scenarios: {', '.join(self.scenarios)}")
-        if self.pwf_files:
-            parts.append(f"PWF files loaded: {', '.join(self.pwf_files)}")
         if self.contingencies:
             parts.append(f"Contingencies: {', '.join(self.contingencies)}")
         if self.last_convergence is not None:
@@ -45,7 +42,6 @@ class StudyState:
             "sin_area": self.sin_area,
             "technology": self.technology,
             "scenarios": self.scenarios,
-            "pwf_files": self.pwf_files,
             "modification_needed": self.modification_needed,
             "contingencies": self.contingencies,
             "last_convergence": self.last_convergence,

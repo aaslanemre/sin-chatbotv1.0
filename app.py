@@ -2,8 +2,6 @@ import hashlib
 import importlib
 import re
 import streamlit as st
-from pathlib import Path
-from utils.pwf_handler import save_pwf
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
@@ -51,17 +49,9 @@ if "messages" not in st.session_state:
 if "study" not in st.session_state:
     st.session_state.study = load_study()
 
-if "pwf_files" not in st.session_state:
-    st.session_state.pwf_files = []
-
 if "simulation_mode" not in st.session_state:
     st.session_state.simulation_mode = False
 
-if "modified_pwf_path" not in st.session_state:
-    st.session_state.modified_pwf_path = None
-
-if "last_uploaded_results" not in st.session_state:
-    st.session_state.last_uploaded_results = None
 
 # Simulation state machine state
 if "sim_step" not in st.session_state:
@@ -557,91 +547,8 @@ with st.sidebar:
         st.info("💬 Modo: Conversa Livre")
 
     st.divider()
-
-    st.caption("**Cenários PWF**")
-    uploaded_pwf = st.file_uploader(
-        "Selecionar arquivo .pwf",
-        type=["pwf"],
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-    )
-    if uploaded_pwf:
-        if st.button("📤 Confirmar upload PWF", use_container_width=True, type="primary"):
-            newly_added = []
-            for f in uploaded_pwf:
-                if f.name not in [p["name"] for p in st.session_state.pwf_files]:
-                    path = save_pwf(f)
-                    st.session_state.pwf_files.append({"name": f.name, "path": str(path)})
-                    st.session_state.study.pwf_files.append(f.name)
-                    newly_added.append(f.name)
-            if newly_added:
-                save_study(st.session_state.study)
-                for name in newly_added:
-                    st.toast(f"✅ {name} carregado!", icon="✅")
-                st.rerun()
-            else:
-                st.toast("Arquivo já estava carregado.", icon="ℹ️")
-
-    if st.session_state.pwf_files:
-        st.caption("**Arquivos carregados:**")
-        for i, pwf in enumerate(st.session_state.pwf_files):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.success(f"✓ {pwf['name']}")
-            with col2:
-                if st.button("✕", key=f"rm_{i}", help="Remover"):
-                    st.session_state.pwf_files.pop(i)
-                    st.session_state.study.pwf_files = [
-                        p["name"] for p in st.session_state.pwf_files
-                    ]
-                    save_study(st.session_state.study)
-                    st.rerun()
-
-    st.divider()
-
-    st.caption("**Resultados Anarede**")
-    results_file = st.file_uploader(
-        "Arquivo de saída do Anarede",
-        type=["txt", "res", "lst", "out"],
-        label_visibility="collapsed",
-    )
-    if results_file and results_file.name != st.session_state.last_uploaded_results:
-        if st.button("📤 Analisar resultados", use_container_width=True, type="primary"):
-            with st.spinner("Analisando arquivo..."):
-                rpath = save_results_file(results_file, results_file.name)
-                analysis = check_convergence(rpath)
-                report = format_results_report(analysis)
-                st.session_state.study.last_convergence = analysis["converged"]
-                save_study(st.session_state.study)
-                st.session_state.last_uploaded_results = results_file.name
-            if analysis["converged"]:
-                st.toast("✅ Simulação convergiu!", icon="✅")
-            else:
-                st.toast("❌ Simulação não convergiu.", icon="❌")
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"**Análise do arquivo de resultados:**\n\n{report}",
-                "sources": [],
-            })
-            st.rerun()
-
-    if st.session_state.modified_pwf_path:
-        p = Path(st.session_state.modified_pwf_path)
-        if p.exists():
-            st.divider()
-            st.caption("**PWF Modificado**")
-            st.download_button(
-                label="⬇️ Baixar PWF modificado",
-                data=p.read_bytes(),
-                file_name=p.name,
-                mime="application/octet-stream",
-            )
-
-    st.divider()
     if st.button("🗑️ Limpar conversa", use_container_width=True):
         st.session_state.messages = [st.session_state.messages[0]]
-        st.session_state.pwf_files = []
-        st.session_state.modified_pwf_path = None
         st.session_state.simulation_mode = False
         st.session_state.sim_step = "IDLE"
         st.session_state.sim_data = {}
@@ -652,8 +559,11 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.caption(
+        "💡 O processo de simulação é conduzido inteiramente "
+        "pelo chat. Não é necessário fazer upload de arquivos."
+    )
     st.caption("v3.0 experimental")
-    st.caption("Documentos: ONS PAR/PEL 2025, EPE PDE 2035, Manuais ANAREDE/ANATEM")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -706,13 +616,8 @@ if prompt:
             st.markdown(answer)
         else:
             # MODE 1: free technical Q&A via LLM
-            pwf_context = ""
-            if st.session_state.pwf_files:
-                names = ", ".join(p["name"] for p in st.session_state.pwf_files)
-                pwf_context = f"\n\n[Arquivos PWF carregados: {names}]"
-
             study_context = st.session_state.study.summary()
-            full_prompt = prompt + pwf_context
+            full_prompt = prompt
 
             with st.spinner("Consultando base de conhecimento..."):
                 try:
