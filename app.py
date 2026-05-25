@@ -86,13 +86,6 @@ _SIMULATION_INTENT_TRIGGERS = [
     "gostaria de fazer uma simulac",   # handles typos like "simulacao"
 ]
 
-_ANAREDE_EXEC_TRIGGERS = [
-    "como executo", "como rodo", "como rodar", "executar o anarede",
-    "rodar o anarede", "já tenho o arquivo carregado", "ja tenho o arquivo",
-    "como usar o anarede", "iniciar o anarede", "abrir o anarede",
-    "próximo passo", "proximo passo", "e agora", "o que faço agora",
-]
-
 _PARPEL_SCENARIOS = (
     "Qual cenário de carga deseja utilizar?\n\n"
     "1. Verão Máxima Diurna (6h–18h, novembro–abril)\n"
@@ -100,7 +93,9 @@ _PARPEL_SCENARIOS = (
     "3. Verão Mínima Noturna (0h–6h e 18h–0h, novembro–abril)\n"
     "4. Inverno Máxima Diurna (6h–18h, maio–outubro)\n"
     "5. Inverno Máxima Noturna (0h–6h e 18h–0h, maio–outubro)\n"
-    "6. Inverno Mínima Noturna (0h–6h e 18h–0h, maio–outubro)"
+    "6. Inverno Mínima Noturna (0h–6h e 18h–0h, maio–outubro)\n\n"
+    "Nota: dentro do arquivo SAV, ao carregá-lo no ANAREDE, você poderá "
+    "selecionar o cenário desejado. O SAV contém todos os patamares."
 )
 
 _PDE_SCENARIOS = (
@@ -113,15 +108,6 @@ _PDE_SCENARIOS = (
     "6. Mínima Noturna Úmido (0h–6h e 18h–0h, dezembro–abril)\n"
     "7. Máxima Coincidente SIN Úmido (14h–16h, março)\n"
     "8. Mínima Líquida Diurna Coincidente SIN Seco (12h–14h, agosto)"
-)
-
-_ANAREDE_COMING_SOON = (
-    "O guia passo a passo de execução do Anarede está em desenvolvimento "
-    "e será disponibilizado em breve.\n\n"
-    "Por enquanto, execute o Anarede com o arquivo PWF carregado seguindo "
-    "a documentação do CEPEL.\n\n"
-    "Quando tiver o arquivo de resultados pronto, faça o upload usando "
-    "o botão 📊 na barra lateral e eu analiso a convergência para você."
 )
 
 _PARPEL_SCENARIO_NAMES = {
@@ -150,103 +136,112 @@ def _is_simulation_intent(text: str) -> bool:
     return any(trigger in t for trigger in _SIMULATION_INTENT_TRIGGERS)
 
 
-def _is_anarede_exec(text: str) -> bool:
-    t = text.lower()
-    return any(trigger in t for trigger in _ANAREDE_EXEC_TRIGGERS)
-
-
-def _parse_period(text: str):
-    """Return (start_year, end_year) or (year, year) for single year."""
-    # Match "2027-2030" or "2027 a 2030"
-    m = re.search(r"(20\d\d)\s*[-–a]\s*(20\d\d)", text)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    # Match single year
-    m = re.search(r"\b(20\d\d)\b", text)
-    if m:
-        y = int(m.group(1))
-        return y, y
-    return None, None
-
-
-def _recommend_db(start: int, end: int) -> str:
-    if start < 2029:
-        return "PARPEL"
-    if end > 2030:
-        return "PDE"
-    return "BOTH"
-
-
-def _db_recommendation_msg(db: str, start: int, end: int) -> str:
-    if db == "PARPEL":
-        return (
-            f"Para o período {start}–{end}, recomendo o **PAR/PEL 2025** do ONS — "
-            f"os anos anteriores a 2029 estão disponíveis apenas nessa base.\n\n"
-            f"🔗 Download: https://www.ons.org.br/topo/acesso-restrito\n"
-            f"_(Requer cadastro gratuito no Portal SINTEGRE)_\n\n"
-            + _PARPEL_SCENARIOS
-        )
-    if db == "PDE":
-        return (
-            f"Para o período {start}–{end}, utilize o **PDE 2035** da EPE, "
-            f"que cobre até 2040.\n\n"
-            f"🔗 Download: https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/"
-            f"planejamento-da-transmissao/bases-de-dados-de-simulacao\n"
-            f"_(Download público direto, sem cadastro)_\n\n"
-            + _PDE_SCENARIOS
-        )
-    # BOTH
-    return (
-        f"O período {start}–{end} está coberto por ambas as bases:\n\n"
-        "- **PAR/PEL 2025 (ONS)**: foco em planejamento operacional (até 2030)\n"
-        "  🔗 https://www.ons.org.br/topo/acesso-restrito\n"
-        "- **PDE 2035 (EPE)**: foco em expansão de longo prazo (até 2040)\n"
-        "  🔗 https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/"
-        "planejamento-da-transmissao/bases-de-dados-de-simulacao\n\n"
-        "Qual prefere utilizar — planejamento operacional (PAR/PEL) ou expansão (PDE)?"
-    )
+def _parse_years(text: str) -> list[int]:
+    """Return list of years found in text."""
+    return [int(y) for y in re.findall(r"\b(20\d\d)\b", text)]
 
 
 def _parse_scenario(text: str, db: str):
     t = text.strip().lower()
-    lookup = _PARPEL_SCENARIO_NAMES if db == "PARPEL" else _PDE_SCENARIO_NAMES
-    # Try exact number
+    lookup = _PARPEL_SCENARIO_NAMES if db in ("ONS", "PARPEL") else _PDE_SCENARIO_NAMES
     m = re.match(r"^(\d)$", t)
     if m and m.group(1) in lookup:
         return lookup[m.group(1)]
-    # Try name match
     for key, name in lookup.items():
-        if key in t or key.replace("ú", "u").replace("ã", "a") in t:
+        if key in t or key.replace("ú", "u").replace("ã", "a").replace("é", "e") in t:
             return name
     return None
 
 
-def _pwf_filename_hint(db: str, scenario: str, year: int) -> str:
-    if db == "PARPEL":
-        mapping = {
-            "Verão Máxima Diurna":    f"01 VERAO {year} MAX DIURNO.PWF",
-            "Verão Máxima Noturna":   f"02 VERAO {year} MAX NOTURNO.PWF",
-            "Verão Mínima Noturna":   f"03 VERAO {year} MIN NOTURNO.PWF",
-            "Inverno Máxima Diurna":  f"04 INVERNO {year} MAX DIURNO.PWF",
-            "Inverno Máxima Noturna": f"05 INVERNO {year} MAX NOTURNO.PWF",
-            "Inverno Mínima Noturna": f"06 INVERNO {year} MIN NOTURNO.PWF",
-        }
+def _sav_filename_hint(db: str, scenario: str, year: int) -> str:
+    if db in ("ONS", "PARPEL"):
+        return (
+            f"Procure pelo arquivo SAV: **{year}.SAV**\n\n"
+            "No ANAREDE:\n"
+            "1. Vá em **Histórico > Operações**\n"
+            f"2. Selecione o caso correspondente ao cenário **{scenario}**\n"
+            "3. Clique em **Restabelecer**\n\n"
+            "Após carregar, verifique o canto superior direito do ANAREDE. "
+            "O caso base já vem convergido — deve aparecer um quadrado **VERDE** "
+            "com o texto 'Convergido'.\n\n"
+            "O que aparece no canto superior direito?"
+        )
     else:
-        mapping = {
-            "Máxima Diurna Seco":      f"{year}_1. PD 2035 - MAXIMA DIURNA SECO.PWF",
-            "Máxima Diurna Úmido":     f"{year}_2. PD 2035 - MAXIMA DIURNA UMIDO.PWF",
-            "Máxima Noturna Seco":     f"{year}_3. PD 2035 - MAXIMA NOTURNA SECO.PWF",
-            "Máxima Noturna Úmido":    f"{year}_4. PD 2035 - MAXIMA NOTURNA UMIDO.PWF",
-            "Mínima Noturna Seco":     f"{year}_5. PD 2035 - MINIMA NOTURNA SECO.PWF",
-            "Mínima Noturna Úmido":    f"{year}_6. PD 2035 - MINIMA NOTURNA UMIDO.PWF",
-            "Máxima Coincidente SIN":  f"{year}_7. PD 2035 - MAXIMA COINCIDENTE SIN.PWF",
-            "Mínima Líquida Diurna":   f"{year}_8. PD 2035 - MINIMA LIQUIDA DIURNA.PWF",
+        pde_map = {
+            "Máxima Diurna Seco":     f"{year}_1. PD 2035 - MÁXIMA DIURNA SECO.PWF",
+            "Máxima Diurna Úmido":    f"{year}_2. PD 2035 - MÁXIMA DIURNA ÚMIDO.PWF",
+            "Máxima Noturna Seco":    f"{year}_3. PD 2035 - MÁXIMA NOTURNA SECO.PWF",
+            "Máxima Noturna Úmido":   f"{year}_4. PD 2035 - MÁXIMA NOTURNA ÚMIDO.PWF",
+            "Mínima Noturna Seco":    f"{year}_5. PD 2035 - MÍNIMA NOTURNA SECO.PWF",
+            "Mínima Noturna Úmido":   f"{year}_6. PD 2035 - MÍNIMA NOTURNA ÚMIDO.PWF",
+            "Máxima Coincidente SIN": f"{year}_7. PD 2035 - MÁXIMA COINCIDENTE SIN.PWF",
+            "Mínima Líquida Diurna":  f"{year}_8. PD 2035 - MÍNIMA LÍQUIDA DIURNA.PWF",
         }
-    fname = mapping.get(scenario, f"{scenario} {year}.PWF")
+        fname = pde_map.get(scenario, f"{year} {scenario}.PWF")
+        return (
+            f"Procure pelo arquivo: **{fname}** ou o SAV correspondente.\n\n"
+            "Após carregar no ANAREDE, verifique o canto superior direito.\n\n"
+            "O que aparece lá?"
+        )
+
+
+def _is_converged(text: str) -> bool:
+    t = text.lower()
+    neg = any(w in t for w in ["não ", "nao ", "n convergiu", "n convergido"])
+    pos = any(w in t for w in ["convergido", "convergiu", "verde", "converge"])
+    return pos and not neg
+
+
+def _is_not_converged(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in [
+        "não convergido", "nao convergido", "não convergiu", "nao convergiu",
+        "amarelo", "vermelho", "não converge", "nao converge",
+    ])
+
+
+def _parse_bess_mode(text: str):
+    t = text.strip().lower()
+    if t == "1" or any(w in t for w in ["pv", "tensão", "tensao", "controle", "gfm"]):
+        return "PV"
+    if t == "2" or any(w in t for w in ["pq", "despacho fixo", "fixo"]):
+        return "PQ"
+    return None
+
+
+def _parse_mva(text: str):
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:mva|mw|MW|MVA)?", text)
+    if m:
+        return m.group(1).replace(",", ".")
+    return None
+
+
+def _bess_pwf_lines(data: dict) -> str:
+    bus = data.get("bess_bus", "XXXXX")
+    mva = data.get("bess_mva", "100")
+    mode_type = "2" if data.get("bess_mode") == "PV" else "1"
+    try:
+        s = float(mva)
+        qmax = round((s ** 2) ** 0.5, 1)
+        qmin = -qmax
+    except Exception:
+        qmax, qmin = 9999, -9999
     return (
-        f"Procure pelo arquivo:\n\n"
-        f"```\n{fname}\n```\n\n"
-        "Após baixar, faça o upload usando o botão 📎 na barra lateral."
+        "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
+        "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
+        f"```\n"
+        f"DBAR\n"
+        f"NNNNN 0 {mode_type} BESS_{str(bus)[:8]:<8}  500  0  0  0  {mva}  {qmax}  {qmin}  1.00\n"
+        f"99999\n"
+        f"DLIN\n"
+        f"{bus} NNNNN  0  .00001  0  0\n"
+        f"99999\n"
+        f"FIM\n"
+        f"```\n\n"
+        "Substitua **NNNNN** pelo número de uma barra não existente no caso, "
+        "e ajuste **VBASE** conforme a tensão da subestação.\n\n"
+        "Após inserir a BESS, o quadrado no canto superior direito mudará para "
+        "**amarelo** ('Não Convergido'). Isso é normal."
     )
 
 
@@ -258,10 +253,6 @@ def _handle_sim_state(user_text: str) -> str | None:
     step = st.session_state.sim_step
     data = st.session_state.sim_data
 
-    # ── Anarede execution shortcut (any step) ─────────────────────────────────
-    if _is_anarede_exec(user_text) and step not in ("IDLE",):
-        return _ANAREDE_COMING_SOON
-
     # ── IDLE: check for simulation intent ─────────────────────────────────────
     if step == "IDLE":
         if _is_simulation_intent(user_text):
@@ -269,104 +260,262 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "STEP1"
             return (
                 "Ótimo! Vou te guiar pelo processo de simulação passo a passo.\n\n"
-                "Antes de começarmos, você vai precisar baixar os arquivos PWF base. "
-                "Existem duas fontes principais:\n\n"
-                "📥 **PAR/PEL 2025 (ONS)** — horizonte 2026–2030, planejamento operacional:\n"
-                "https://www.ons.org.br/topo/acesso-restrito\n"
-                "_(Requer cadastro gratuito no Portal SINTEGRE)_\n\n"
-                "📥 **PDE 2035 (EPE)** — horizonte 2029–2040, planejamento de expansão:\n"
-                "https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/planejamento-da-transmissao/bases-de-dados-de-simulacao\n"
-                "_(Download público direto, sem cadastro)_\n\n"
+                "Antes de começarmos, você vai precisar baixar os arquivos da base "
+                "de dados. Existem duas fontes principais:\n\n"
+                "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos. "
+                "Base lançada no início do ano com revisões ao longo do ano. "
+                "Acesso via Portal SINTEGRE (cadastro gratuito):\n"
+                "https://www.ons.org.br/topo/acesso-restrito\n\n"
+                "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos. "
+                "Download público direto, sem cadastro:\n"
+                "https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/planejamento-da-transmissao/bases-de-dados-de-simulacao\n\n"
                 "Você pode ir baixando enquanto respondemos as próximas perguntas.\n\n"
-                "**[STEP 1]** Qual o período do estudo? (ex: 2027–2030 ou um ano específico como 2028)"
+                "---\n\n"
+                "**Qual base de dados deseja utilizar?**\n\n"
+                "1. **EPE (PDE)** — foco em planejamento de expansão de longo prazo, "
+                "horizonte de ~10 anos. Modelos com maior incerteza sobre o futuro.\n\n"
+                "2. **ONS (PAR/PEL)** — foco em planejamento operacional de médio prazo, "
+                "horizonte de ~5 anos. Modelos mais detalhados e confiáveis para "
+                "decisões operativas.\n\n"
+                "Para estudos de inserção de tecnologias como BESS no SIN, o "
+                "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
             )
         return None  # Let LLM answer
 
-    # ── STEP 1: waiting for period ─────────────────────────────────────────────
+    # ── STEP 1: waiting for EPE/ONS choice ────────────────────────────────────
     if step == "STEP1":
-        start, end = _parse_period(user_text)
-        if start is None:
+        t = user_text.strip().lower()
+        if t == "1" or any(w in t for w in ["epe", "pde", "expansão", "expansao", "longo prazo"]):
+            data["db"] = "EPE"
+            label = "PDE (EPE)"
+        elif t == "2" or any(w in t for w in ["ons", "par", "pel", "operacional"]):
+            data["db"] = "ONS"
+            label = "PAR/PEL (ONS)"
+        else:
             return (
-                "Não consegui identificar o período. "
-                "Por favor, informe o período do estudo. Exemplos: **2027–2030** ou **2028**."
+                "Não identifiquei a escolha. Por favor, responda com **1** (EPE/PDE) "
+                "ou **2** (ONS/PAR/PEL)."
             )
-        data["start"] = start
-        data["end"] = end
-        db = _recommend_db(start, end)
-        data["db"] = db
-        if db == "BOTH":
-            st.session_state.sim_step = "STEP2A_BOTH"
-        else:
-            st.session_state.sim_step = "STEP2B"
-        return _db_recommendation_msg(db, start, end)
+        st.session_state.sim_step = "STEP2"
+        return (
+            f"Ótimo, usaremos o **{label}**.\n\n"
+            "**Qual ano (ou anos) deseja estudar?**\n\n"
+            "Pode informar um único ano (ex: **2028**) ou múltiplos anos "
+            "(ex: **2027, 2028, 2029**). O normal é estudar um conjunto de anos diferentes."
+        )
 
-    # ── STEP 2A (BOTH): waiting for db choice ─────────────────────────────────
-    if step == "STEP2A_BOTH":
-        t = user_text.lower()
-        if "pde" in t or "expansão" in t or "expansao" in t or "longo prazo" in t:
-            data["db"] = "PDE"
-        else:
-            data["db"] = "PARPEL"
+    # ── STEP 2: waiting for year(s) ───────────────────────────────────────────
+    if step == "STEP2":
+        years = _parse_years(user_text)
+        if not years:
+            return "Não identifiquei o(s) ano(s). Por favor, informe o ano desejado (ex: **2028**)."
+        data["years"] = years
+        data["year_idx"] = 0
         db = data["db"]
-        st.session_state.sim_step = "STEP2B"
-        label = "PAR/PEL 2025" if db == "PARPEL" else "PDE 2035"
-        scenarios = _PARPEL_SCENARIOS if db == "PARPEL" else _PDE_SCENARIOS
-        return f"Ótimo, usaremos o **{label}**.\n\n{scenarios}"
+        st.session_state.sim_step = "STEP3"
+        scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+        years_str = ", ".join(str(y) for y in years)
+        return f"Anos selecionados: **{years_str}**.\n\n{scenarios}"
 
-    # ── STEP 2B: waiting for scenario selection ────────────────────────────────
-    if step == "STEP2B":
-        db = data.get("db", "PARPEL")
+    # ── STEP 3: waiting for scenario ──────────────────────────────────────────
+    if step == "STEP3":
+        db = data.get("db", "ONS")
         scenario = _parse_scenario(user_text, db)
         if scenario is None:
-            scenarios = _PARPEL_SCENARIOS if db == "PARPEL" else _PDE_SCENARIOS
-            return (
-                "Não identifiquei o cenário. Por favor, selecione pelo número ou nome:\n\n"
-                + scenarios
-            )
+            scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+            return "Não identifiquei o cenário. Por favor, selecione pelo número:\n\n" + scenarios
         data["scenario"] = scenario
-        start, end = data["start"], data["end"]
-        if start == end:
-            # Single year already known
-            data["year"] = start
-            st.session_state.sim_step = "STEP3"
-            return f"Cenário selecionado: **{scenario}**.\n\n" + _pwf_filename_hint(db, scenario, start)
-        # Interval: ask for specific year
-        st.session_state.sim_step = "STEP2C"
-        years = "\n".join(f"- {y}" for y in range(start, end + 1))
-        return (
-            f"Cenário selecionado: **{scenario}**.\n\n"
-            f"Para qual ano dentro do período?\n\n{years}"
-        )
-
-    # ── STEP 2C: waiting for specific year ────────────────────────────────────
-    if step == "STEP2C":
-        m = re.search(r"\b(20\d\d)\b", user_text)
-        if not m:
-            start, end = data["start"], data["end"]
-            years = "\n".join(f"- {y}" for y in range(start, end + 1))
-            return f"Não identifiquei o ano. Escolha um dos anos:\n\n{years}"
-        year = int(m.group(1))
+        year = data["years"][data.get("year_idx", 0)]
         data["year"] = year
-        db = data.get("db", "PARPEL")
-        scenario = data.get("scenario", "")
-        st.session_state.sim_step = "STEP3"
-        return _pwf_filename_hint(db, scenario, year)
+        st.session_state.sim_step = "STEP4"
+        return f"Cenário selecionado: **{scenario}** — ano **{year}**.\n\n" + _sav_filename_hint(db, scenario, year)
 
-    # ── STEP 3: waiting for PWF upload confirmation ────────────────────────────
-    if step == "STEP3":
-        t = user_text.lower()
-        if st.session_state.pwf_files or any(
-            kw in t for kw in ["carregado", "fiz upload", "já carreguei", "sim", "ok", "pronto", "feito"]
-        ):
-            st.session_state.sim_step = "STEP5"
+    # ── STEP 4: convergence check of base case ────────────────────────────────
+    if step == "STEP4":
+        if _is_converged(user_text):
+            st.session_state.sim_step = "STEP6"
             return (
-                "Arquivo PWF recebido. Vamos prosseguir.\n\n"
-                + _ANAREDE_COMING_SOON
+                "Perfeito! O caso base está convergido.\n\n"
+                "---\n\n"
+                "**Agora vamos preparar a visualização da região de estudo.**\n\n"
+                "A tela do ANAREDE está em branco. Para visualizar os resultados "
+                "graficamente, você precisa carregar ou desenhar um diagrama LST.\n\n"
+                "**Opção A** — Se já tiver um arquivo LST:\n"
+                "Vá em **Diagrama > Carregar** e selecione o arquivo LST.\n\n"
+                "**Opção B** — Se não tiver:\n"
+                "Clique no ícone do **lápis** no menu superior. Aparecerá um diálogo "
+                "com os elementos que podem ser modelados. Desenhe a região ao entorno "
+                "da barra que deseja estudar.\n\n"
+                "Qual opção você vai utilizar?"
             )
+        elif _is_not_converged(user_text):
+            return (
+                "O caso base não está convergido, o que é incomum pois os casos da "
+                "EPE e ONS já vêm convergidos. Verifique se:\n\n"
+                "- Carregou o arquivo SAV correto\n"
+                "- Selecionou o caso correto em **Histórico > Operações**\n"
+                "- O arquivo não está corrompido\n\n"
+                "Tente recarregar o arquivo e informe novamente o que aparece "
+                "no canto superior direito."
+            )
+        else:
+            return "O que aparece no canto superior direito do ANAREDE após carregar o caso?"
+
+    # ── STEP 6: LST diagram ───────────────────────────────────────────────────
+    if step == "STEP6":
+        st.session_state.sim_step = "STEP7"
         return (
-            "Por favor, faça o upload do arquivo PWF usando o botão 📎 na barra lateral "
-            "e confirme aqui quando estiver carregado."
+            "Ótimo!\n\n"
+            "**Agora vamos modelar a BESS.**\n\n"
+            "Qual é a barra onde deseja inserir a BESS?\n\n"
+            "Dica: escolha a subestação com maior carga na área de estudo "
+            "que disponha de margem para injeção de potência. O ONS disponibiliza "
+            "mapas interativos e relatórios indicando a margem de escoamento de "
+            "geração das subestações da rede básica."
         )
+
+    # ── STEP 7: bus identification + BESS mode ───────────────────────────────
+    if step == "STEP7":
+        if "bess_bus" not in data:
+            # Parse bus from user message — accept any number or name
+            bus_match = re.search(r"\b(\d{4,5})\b", user_text)
+            if bus_match:
+                data["bess_bus"] = bus_match.group(1)
+            else:
+                # Accept any non-trivial text as bus name
+                stripped = user_text.strip()
+                if len(stripped) >= 2:
+                    data["bess_bus"] = stripped
+                else:
+                    return (
+                        "Não identifiquei a barra. Por favor, informe o número "
+                        "ou nome da barra onde deseja inserir a BESS."
+                    )
+            bus = data["bess_bus"]
+            return (
+                f"Barra selecionada: **{bus}**.\n\n"
+                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
+                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
+                "(resistência e susceptância zeradas).\n\n"
+                "**Qual o modo de operação da BESS?**\n\n"
+                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+                "do SIN, especialmente se o leilão exigir modo GFM. A barra é configurada "
+                "com despacho fixo de potência ativa e tensão-alvo que a BESS tentará controlar.\n\n"
+                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+            )
+        else:
+            # Waiting for mode
+            mode = _parse_bess_mode(user_text)
+            if mode is None:
+                return (
+                    "Não identifiquei o modo. Responda **1** (controle de tensão / PV) "
+                    "ou **2** (despacho fixo / PQ)."
+                )
+            data["bess_mode"] = mode
+            mode_label = "PV (controle de tensão)" if mode == "PV" else "PQ (despacho fixo)"
+            st.session_state.sim_step = "STEP8"
+            return (
+                f"Modo selecionado: **{mode_label}**.\n\n"
+                "**Qual a potência nominal da BESS em MVA?**\n\n"
+                "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
+                "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
+                "- Para cada valor, verifique convergência e impactos no sistema\n\n"
+                "Os limites de potência reativa serão calculados automaticamente: "
+                "Q_max = √(S² − P²), Q_min = −Q_max"
+            )
+
+    # ── STEP 8: BESS power config ─────────────────────────────────────────────
+    if step == "STEP8":
+        mva = _parse_mva(user_text)
+        if mva is None:
+            return "Não identifiquei a potência. Por favor, informe o valor em MVA (ex: **100**)."
+        data["bess_mva"] = mva
+        st.session_state.sim_step = "STEP9"
+        pwf_lines = _bess_pwf_lines(data)
+        return (
+            f"Potência nominal: **{mva} MVA**.\n\n"
+            + pwf_lines
+            + "\n\n---\n\n"
+            "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
+            "No ANAREDE:\n"
+            "1. Vá em **Histórico > Operações**\n"
+            "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
+            "3. Clique em **Salvar**\n\n"
+            "Confirme quando o caso estiver salvo."
+        )
+
+    # ── STEP 9: waiting for save confirmation ─────────────────────────────────
+    if step == "STEP9":
+        t = user_text.lower()
+        if any(kw in t for kw in ["salvo", "salvei", "ok", "sim", "pronto", "feito", "confirmado", "salv"]):
+            st.session_state.sim_step = "STEP10"
+            return (
+                "Ótimo! Caso salvo.\n\n"
+                "**Agora rode o algoritmo de fluxo de potência.**\n\n"
+                "Forma mais rápida: pressione **Ctrl + R** no teclado.\n"
+                "Isso repete a última configuração do algoritmo salva no SAV.\n\n"
+                "Alternativa: vá em **Análise > Cálculo de Fluxo de Potência** para "
+                "acessar todos os métodos e controles disponíveis.\n\n"
+                "Após rodar, o que aparece no canto superior direito do ANAREDE?"
+            )
+        return "Confirme quando o caso estiver salvo no ANAREDE (responda 'salvo' ou 'pronto')."
+
+    # ── STEP 10: convergence check of modified case ───────────────────────────
+    if step == "STEP10":
+        if _is_converged(user_text):
+            st.session_state.sim_step = "STEP11"
+            return (
+                "Ótimo! O caso convergiu.\n\n"
+                "Salve o caso convergido (pode sobrescrever o caso salvo no passo anterior).\n\n"
+                "**Para verificar o impacto da BESS no diagrama:**\n"
+                "- Sobrecargas e sobretensões aparecem com **hachura VERMELHA**\n"
+                "- Subtensões aparecem com **hachura AZUL**\n"
+                "- Verifique também os impactos na barra de referência e nas "
+                "principais barras de geração do SIN\n\n"
+                "O que você está observando no diagrama?"
+            )
+        elif _is_not_converged(user_text):
+            return (
+                "O caso não convergiu. Vamos tentar resolver.\n\n"
+                "**PASSO 1** — Recarregue o caso salvo antes de rodar o fluxo:\n"
+                "Histórico > Operações > selecione o caso salvo > Restabelecer\n\n"
+                "**PASSO 2** — Reduza a injeção de potência ativa da BESS para um "
+                "valor próximo de zero e rode novamente (Ctrl + R).\n\n"
+                "**PASSO 3** — Se convergiu com valor baixo, aumente gradualmente "
+                "a potência injetada até encontrar o limite que o sistema suporta.\n\n"
+                "Recarregue o caso e informe o que aparece no canto superior direito."
+            )
+        else:
+            return "O que aparece no canto superior direito do ANAREDE após rodar o fluxo?"
+
+    # ── STEP 11: results analysis ─────────────────────────────────────────────
+    if step == "STEP11":
+        st.session_state.sim_step = "STEP12"
+        return (
+            "Obrigado pela análise!\n\n"
+            "**Próximos passos recomendados:**\n\n"
+            "1. Repetir esta simulação para outros patamares de carga e geração "
+            "(máxima noturna, mínima noturna, etc.)\n"
+            "2. Testar em outros anos do período escolhido\n"
+            "3. Simular contingências N-1 (desligamento de linhas e geradores) "
+            "na região de estudo\n"
+            "4. Após validar em regime permanente com ANAREDE, testar a solução "
+            "no ANATEM para verificar o desempenho dinâmico\n\n"
+            "Deseja continuar com outro cenário ou patamar de carga?"
+        )
+
+    # ── STEP 12: offer next iteration ─────────────────────────────────────────
+    if step == "STEP12":
+        t = user_text.lower()
+        if any(kw in t for kw in ["sim", "outro", "continuar", "próximo", "proximo", "outro cenário"]):
+            # Reset to STEP3 to pick a new scenario for the same year, or STEP2 for new year
+            data.pop("scenario", None)
+            st.session_state.sim_step = "STEP3"
+            db = data.get("db", "ONS")
+            scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+            return "Qual cenário deseja estudar agora?\n\n" + scenarios
+        # Let LLM handle general questions
+        return None
 
     return None  # fallback to LLM
 
@@ -390,12 +539,18 @@ if st.session_state.chain is None and st.session_state.chain_error is None:
 with st.sidebar:
     if st.session_state.simulation_mode:
         step_label = {
-            "IDLE": "", "STEP1": "STEP 1: Período",
-            "STEP2A_BOTH": "STEP 2: Base de dados",
-            "STEP2B": "STEP 2: Cenário",
-            "STEP2C": "STEP 2: Ano",
-            "STEP3": "STEP 3: Upload PWF",
-            "STEP5": "STEP 5: Execução",
+            "IDLE":  "",
+            "STEP1":  "STEP 1: Base de dados",
+            "STEP2":  "STEP 2: Ano(s)",
+            "STEP3":  "STEP 3: Cenário",
+            "STEP4":  "STEP 4: Carregar SAV",
+            "STEP6":  "STEP 6: Diagrama LST",
+            "STEP7":  "STEP 7: Barra / Modo BESS",
+            "STEP8":  "STEP 8: Potência BESS",
+            "STEP9":  "STEP 9: Salvar caso",
+            "STEP10": "STEP 10: Rodar fluxo",
+            "STEP11": "STEP 11: Resultados",
+            "STEP12": "STEP 12: Próximos passos",
         }.get(st.session_state.sim_step, "")
         st.success(f"🔬 Modo: Guia de Simulação\n{step_label}")
     else:
