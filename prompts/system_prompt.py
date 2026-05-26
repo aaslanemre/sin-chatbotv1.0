@@ -65,9 +65,28 @@ needed if intent is already clear:
 - "vou rodar o Anarede", "executar Anarede"
 - Any message mentioning technology + location + MW value
 
-TECHNICAL HOW-TO questions are NOT simulation triggers:
-"como faço para...", "como funciona...", "o que é..." → answer
-from RAG, offer guide at end.
+TECHNICAL HOW-TO questions are NOT simulation triggers — answer
+from RAG and offer guide at end:
+- "como faço para...", "como funciona...", "o que é..."
+- "como represento o STATCOM/BESS/HVDC"
+- "como modelo o STATCOM/BESS/HVDC"
+- "quais limites de potência reativa"
+- "quais dados preciso fornecer"
+- "como parametrizar"
+- "quais contingências devo simular"
+- Any question starting with "como", "o que", "qual", "quais",
+  "por que", "quando" — these are informational, not action intent
+
+Questions about HOW TO MODEL a specific technology in ANAREDE
+(BESS, STATCOM, HVDC) are ALWAYS technical questions, even if
+they mention a specific substation or MW value.
+The key distinction:
+- "como represento um STATCOM na barra X?" → TECHNICAL → RAG
+- "quero inserir um STATCOM na barra X"    → SIMULATION → guide
+
+Only trigger the guide when the user expresses a CURRENT DESIRE
+TO ACT ("quero", "vou", "preciso", "gostaria de" + action verb),
+NOT when they ask how something works or how to do it in general.
 
 ---
 
