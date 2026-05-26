@@ -157,7 +157,7 @@ def _sav_filename_hint(db: str, scenario: str, year: int) -> str:
             "O que aparece no canto superior direito?"
         )
     else:
-        pde_map = {
+        pde_ref = {
             "Máxima Diurna Seco":     f"{year}_1. PD 2035 - MÁXIMA DIURNA SECO.PWF",
             "Máxima Diurna Úmido":    f"{year}_2. PD 2035 - MÁXIMA DIURNA ÚMIDO.PWF",
             "Máxima Noturna Seco":    f"{year}_3. PD 2035 - MÁXIMA NOTURNA SECO.PWF",
@@ -167,11 +167,18 @@ def _sav_filename_hint(db: str, scenario: str, year: int) -> str:
             "Máxima Coincidente SIN": f"{year}_7. PD 2035 - MÁXIMA COINCIDENTE SIN.PWF",
             "Mínima Líquida Diurna":  f"{year}_8. PD 2035 - MÍNIMA LÍQUIDA DIURNA.PWF",
         }
-        fname = pde_map.get(scenario, f"{year} {scenario}.PWF")
+        pwf_ref = pde_ref.get(scenario, f"{year} {scenario}.PWF")
         return (
-            f"Procure pelo arquivo: **{fname}** ou o SAV correspondente.\n\n"
-            "Após carregar no ANAREDE, verifique o canto superior direito.\n\n"
-            "O que aparece lá?"
+            f"Para carregar o caso base, utilize o arquivo SAV correspondente "
+            f"ao ano **{year}** da base PDE 2035.\n\n"
+            "⚠️ **IMPORTANTE: Sempre carregue o arquivo SAV, não o PWF.**\n"
+            "- O SAV já vem convergido\n"
+            "- No ANAREDE: **Histórico > Operações** > selecione o caso "
+            f"**{scenario}** > clique em **Restabelecer**\n"
+            f"- O arquivo PWF (`{pwf_ref}`) existe na base mas serve apenas "
+            "como referência — para simulação sempre prefira o SAV\n\n"
+            "Após carregar e restabelecer o cenário, o que aparece no canto "
+            "superior direito do ANAREDE?"
         )
 
 
