@@ -239,6 +239,20 @@ def _parse_mva(text: str):
     return None
 
 
+def _parse_active_power(text: str):
+    """Extract active power P (MW) from phrases like 'potência ativa 80 MW' or 'P=80'."""
+    m = re.search(
+        r"(?:pot[eê]ncia\s+ativa|ativa)[^\d]*(\d+(?:[.,]\d+)?)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).replace(",", ".")
+    m = re.search(r"\bp\s*[=:]\s*(\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).replace(",", ".")
+    return None
+
+
 def _bess_pwf_lines(data: dict) -> str:
     bus_from   = data.get("bess_bus", "")         # existing bus (bus_from)
     bus_to     = data.get("bess_bus_number", "")  # new BESS bus (bus_to)
@@ -248,14 +262,18 @@ def _bess_pwf_lines(data: dict) -> str:
         s = float(mva)
     except Exception:
         s = 100.0
+    try:
+        p = float(data["bess_p_mw"]) if data.get("bess_p_mw") is not None else 0.0
+    except Exception:
+        p = 0.0
 
-    # DBAR block — new BESS bus, Q limits at max (P=0 → Q_max = S)
+    # DBAR block — Q limits from calculate_q_limits(S_mva, P_mw)
     dbar_block = generate_dbar_block(
         bus_number=bus_to,
         bus_name=f"BESS_{str(bus_from)[:5]}",
         bus_type=mode_type,
         S_mva=s,
-        P_mw=0.0,
+        P_mw=p,
     )
     # DLIN block — dummy branch from existing bus to new BESS bus
     dlin_block = generate_dlin_block(
@@ -458,13 +476,17 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── STEP 8: BESS power config ─────────────────────────────────────────────
     if step == "STEP8":
         if "bess_mva" not in data:
-            # Sub-step 8a: collect apparent power rating
+            # Sub-step 8a: collect apparent power (S) and optional active power (P)
             mva = _parse_mva(user_text)
             if mva is None:
                 return "Não identifiquei a potência. Por favor, informe o valor em MVA (ex: **100**)."
             data["bess_mva"] = mva
+            p_mw = _parse_active_power(user_text)
+            if p_mw is not None:
+                data["bess_p_mw"] = p_mw
+            p_info = f" (P ativa = {p_mw} MW)" if p_mw is not None else ""
             return (
-                f"Potência nominal: **{mva} MVA**.\n\n"
+                f"Potência nominal: **{mva} MVA**{p_info}.\n\n"
                 "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
                 "(escolha um número que não exista no caso atual)"
             )

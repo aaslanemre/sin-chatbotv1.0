@@ -141,7 +141,7 @@ def generate_dlin_block(bus_from, bus_to, reactance=0.00001):
 
     from_str = str(bus_from).rjust(5)[:5]
     to_str = str(bus_to).rjust(5)[:5]
-    react_str = str(reactance).rjust(8)[:8]
+    react_str = f"{reactance:.5f}".rjust(8)[:8]
 
     lines.append(f"{from_str}{to_str}  0{react_str}  0  0")
     lines.append("99999")
