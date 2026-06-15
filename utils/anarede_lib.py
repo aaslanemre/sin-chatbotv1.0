@@ -127,3 +127,23 @@ def calculate_q_limits(S_mva, P_mw):
     Returns (q_min, q_max) in Mvar."""
     q = math.sqrt(max(0, S_mva**2 - P_mw**2))
     return (-round(q, 1), round(q, 1))
+
+
+def generate_dlin_block(bus_from, bus_to, reactance=0.00001):
+    """Generate DLIN block for dummy branch connecting BESS to network.
+    bus_from: existing bus number (int)
+    bus_to: new BESS bus number (int)
+    reactance: branch reactance in pu (default 0.00001)
+    Returns formatted DLIN block as string."""
+
+    lines = []
+    lines.append("DLIN")
+
+    from_str = str(bus_from).rjust(5)[:5]
+    to_str = str(bus_to).rjust(5)[:5]
+    react_str = str(reactance).rjust(8)[:8]
+
+    lines.append(f"{from_str}{to_str}  0{react_str}  0  0")
+    lines.append("99999")
+
+    return "\n".join(lines)

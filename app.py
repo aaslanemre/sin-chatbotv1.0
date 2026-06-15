@@ -4,6 +4,7 @@ import re
 import streamlit as st
 from agents.pwf_agent import generate_dbar_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
+from utils.anarede_lib import generate_dlin_block
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 
@@ -215,33 +216,37 @@ def _parse_mva(text: str):
 
 
 def _bess_pwf_lines(data: dict) -> str:
-    bus = data.get("bess_bus", "XXXXX")
-    mva = data.get("bess_mva", "100")
-    mode_type = "2" if data.get("bess_mode") == "PV" else "1"
+    bus_from   = data.get("bess_bus", "")         # existing bus (bus_from)
+    bus_to     = data.get("bess_bus_number", "")  # new BESS bus (bus_to)
+    mva        = data.get("bess_mva", "100")
+    mode_type  = "2" if data.get("bess_mode") == "PV" else "1"
     try:
         s = float(mva)
     except Exception:
         s = 100.0
-    # Generate DBAR block via anarede_lib (P=0 gives Q_max = S, max reactive capability)
+
+    # DBAR block — new BESS bus, Q limits at max (P=0 → Q_max = S)
     dbar_block = generate_dbar_block(
-        bus_number="NNNNN",
-        bus_name=f"BESS_{str(bus)[:5]}",
+        bus_number=bus_to,
+        bus_name=f"BESS_{str(bus_from)[:5]}",
         bus_type=mode_type,
         S_mva=s,
         P_mw=0.0,
+    )
+    # DLIN block — dummy branch from existing bus to new BESS bus
+    dlin_block = generate_dlin_block(
+        bus_from=bus_from,
+        bus_to=bus_to,
+        reactance=0.00001,
     )
     return (
         "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
         "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
         f"```\n"
-        f"{dbar_block}\n"
-        f"DLIN\n"
-        f"{bus} NNNNN  0  .00001  0  0\n"
-        f"99999\n"
+        f"{dbar_block}\n\n"
+        f"{dlin_block}\n\n"
         f"FIM\n"
         f"```\n\n"
-        "Substitua **NNNNN** pelo número de uma barra não existente no caso, "
-        "e ajuste **VBASE** conforme a tensão da subestação.\n\n"
         "Após inserir a BESS, o quadrado no canto superior direito mudará para "
         "**amarelo** ('Não Convergido'). Isso é normal."
     )
@@ -428,23 +433,41 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # ── STEP 8: BESS power config ─────────────────────────────────────────────
     if step == "STEP8":
-        mva = _parse_mva(user_text)
-        if mva is None:
-            return "Não identifiquei a potência. Por favor, informe o valor em MVA (ex: **100**)."
-        data["bess_mva"] = mva
-        st.session_state.sim_step = "STEP9"
-        pwf_lines = _bess_pwf_lines(data)
-        return (
-            f"Potência nominal: **{mva} MVA**.\n\n"
-            + pwf_lines
-            + "\n\n---\n\n"
-            "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
-            "No ANAREDE:\n"
-            "1. Vá em **Histórico > Operações**\n"
-            "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
-            "3. Clique em **Salvar**\n\n"
-            "Confirme quando o caso estiver salvo."
-        )
+        if "bess_mva" not in data:
+            # Sub-step 8a: collect apparent power rating
+            mva = _parse_mva(user_text)
+            if mva is None:
+                return "Não identifiquei a potência. Por favor, informe o valor em MVA (ex: **100**)."
+            data["bess_mva"] = mva
+            return (
+                f"Potência nominal: **{mva} MVA**.\n\n"
+                "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                "(escolha um número que não exista no caso atual)"
+            )
+        else:
+            # Sub-step 8b: collect new BESS bus number, then generate output
+            bus_num_match = re.search(r"\b(\d{4,5})\b", user_text)
+            if not bus_num_match:
+                return (
+                    "Não identifiquei o número da barra. "
+                    "Por favor, informe um número de barra disponível (ex: **9999**)."
+                )
+            data["bess_bus_number"] = bus_num_match.group(1)
+            bus_to = data["bess_bus_number"]
+            mva = data["bess_mva"]
+            st.session_state.sim_step = "STEP9"
+            pwf_lines = _bess_pwf_lines(data)
+            return (
+                f"Barra da BESS: **{bus_to}** — Potência nominal: **{mva} MVA**.\n\n"
+                + pwf_lines
+                + "\n\n---\n\n"
+                "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
+                "No ANAREDE:\n"
+                "1. Vá em **Histórico > Operações**\n"
+                "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
+                "3. Clique em **Salvar**\n\n"
+                "Confirme quando o caso estiver salvo."
+            )
 
     # ── STEP 9: waiting for save confirmation ─────────────────────────────────
     if step == "STEP9":
