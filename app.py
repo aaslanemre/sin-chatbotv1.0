@@ -2,6 +2,7 @@ import hashlib
 import importlib
 import re
 import streamlit as st
+from agents.pwf_agent import generate_dbar_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
@@ -219,17 +220,21 @@ def _bess_pwf_lines(data: dict) -> str:
     mode_type = "2" if data.get("bess_mode") == "PV" else "1"
     try:
         s = float(mva)
-        qmax = round((s ** 2) ** 0.5, 1)
-        qmin = -qmax
     except Exception:
-        qmax, qmin = 9999, -9999
+        s = 100.0
+    # Generate DBAR block via anarede_lib (P=0 gives Q_max = S, max reactive capability)
+    dbar_block = generate_dbar_block(
+        bus_number="NNNNN",
+        bus_name=f"BESS_{str(bus)[:5]}",
+        bus_type=mode_type,
+        S_mva=s,
+        P_mw=0.0,
+    )
     return (
         "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
         "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
         f"```\n"
-        f"DBAR\n"
-        f"NNNNN 0 {mode_type} BESS_{str(bus)[:8]:<8}  500  0  0  0  {mva}  {qmax}  {qmin}  1.00\n"
-        f"99999\n"
+        f"{dbar_block}\n"
         f"DLIN\n"
         f"{bus} NNNNN  0  .00001  0  0\n"
         f"99999\n"

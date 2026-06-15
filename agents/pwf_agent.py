@@ -8,6 +8,7 @@ we insert a new line in the DBAR section with the appropriate fields.
 from pathlib import Path
 from datetime import datetime
 from config.settings import MODIFIED_PWF_DIR
+from utils.anarede_lib import Script_Inclui_DBAR, calculate_q_limits
 
 MODIFIED_DIR = Path(MODIFIED_PWF_DIR)
 MODIFIED_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,6 +26,55 @@ def preview_pwf(pwf_path: Path, max_lines: int = 50) -> str:
     if len(lines) > max_lines:
         preview += f"\n... ({len(lines) - max_lines} more lines)"
     return preview
+
+
+def generate_dbar_block(
+    bus_number,
+    bus_name: str,
+    bus_type: str,
+    S_mva: float,
+    P_mw: float,
+) -> str:
+    """
+    Generate a DBAR block string for a BESS using anarede_lib.
+
+    Args:
+        bus_number: bus number (int) or placeholder string (e.g. 'NNNNN')
+        bus_name:   bus name, max 10 chars
+        bus_type:   '2' for PV (voltage control), '1' for PQ (fixed dispatch)
+        S_mva:      apparent power rating in MVA
+        P_mw:       active power dispatch in MW (used for Q limit calculation)
+
+    Returns:
+        Multi-line string: DBAR header + comment + bus line + 99999 terminator
+    """
+    q_min, q_max = calculate_q_limits(S_mva, P_mw)
+
+    script = Script_Inclui_DBAR(
+        Script=[],
+        vet_numero=[bus_number],
+        vet_operacao=["I"],
+        vet_estado=["L"],
+        vet_tipo=[bus_type],
+        vet_GBT=[],
+        vet_nome=[bus_name],
+        vet_GLT=[],
+        vet_Tensao=[],
+        vet_Angulo=[],
+        vet_geracao_P=[P_mw],
+        vet_geracao_Q=[],
+        vet_limite_Q_min=[q_min],
+        vet_limite_Q_max=[q_max],
+        vet_Barra_Controlada=[],
+        vet_carga_P=[],
+        vet_carga_Q=[],
+        vet_Banco_Cap_Reat=[],
+        vet_Area=[],
+        vet_Tensao_def_carga=[],
+    )
+
+    # Script_Inclui_DBAR returns [[line1, line2, ...]] — flatten to string
+    return "\n".join(script[0])
 
 
 def add_bess_to_dbar(
@@ -60,16 +110,15 @@ def add_bess_to_dbar(
     if dbar_end_idx is None:
         raise ValueError("DBAR section not found in PWF file.")
 
-    bess_line = (
-        f"{bus_number:5d}"
-        f"0"
-        f"1"
-        f" "
-        f"{bus_name:<12s}"
-        f"{'':>30s}"
-        f"{active_power_mw:4.0f}"
-        f"{'':>20s}"
+    dbar_block = generate_dbar_block(
+        bus_number=bus_number,
+        bus_name=bus_name,
+        bus_type="2",  # PV generator (voltage control)
+        S_mva=active_power_mw,
+        P_mw=active_power_mw,
     )
+    # Extract only the bus data line (skip DBAR header, comment, and 99999)
+    bess_line = dbar_block.splitlines()[2]
 
     lines.insert(dbar_end_idx, bess_line)
     return "\n".join(lines)
