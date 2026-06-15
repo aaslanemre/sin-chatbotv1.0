@@ -27,7 +27,7 @@ def Script_Inclui_DBAR(Script,
 
     vet_numero = formatar_argumentos(vet_numero, n_bar, 5)
     vet_operacao = formatar_argumentos(vet_operacao, n_bar, 1)
-    vet_estado = formatar_argumentos(vet_estado, n_bar, 1)
+    vet_estado = formatar_argumentos(vet_estado, n_bar, 2)
     vet_tipo = formatar_argumentos(vet_tipo, n_bar, 1)
     vet_GBT = formatar_argumentos(vet_GBT, n_bar, 5)
     vet_nome = formatar_argumentos(vet_nome, n_bar, 10)
@@ -126,7 +126,7 @@ def calculate_q_limits(S_mva, P_mw):
     """Calculate reactive power limits from apparent and active power.
     Returns (q_min, q_max) in Mvar."""
     q = math.sqrt(max(0, S_mva**2 - P_mw**2))
-    return (-round(q, 1), round(q, 1))
+    return (-int(round(q)), int(round(q)))
 
 
 def generate_dlin_block(bus_from, bus_to, reactance=0.00001):
