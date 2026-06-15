@@ -1,6 +1,7 @@
 import hashlib
 import importlib
 import re
+import unicodedata
 import streamlit as st
 from agents.pwf_agent import generate_dbar_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
@@ -133,15 +134,38 @@ def _parse_years(text: str) -> list[int]:
     return [int(y) for y in re.findall(r"\b(20\d\d)\b", text)]
 
 
+def _normalize_str(s: str) -> str:
+    """Lowercase, strip accents, collapse non-alphanumeric to spaces."""
+    s = s.lower()
+    nfkd = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in nfkd if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _parse_scenario(text: str, db: str):
-    t = text.strip().lower()
     lookup = _PARPEL_SCENARIO_NAMES if db in ("ONS", "PARPEL") else _PDE_SCENARIO_NAMES
-    m = re.match(r"^(\d)$", t)
-    if m and m.group(1) in lookup:
-        return lookup[m.group(1)]
+
+    # Step 1: extract a digit (1–6 PAR/PEL, 1–8 PDE) anywhere in the message
+    max_n = "6" if db in ("ONS", "PARPEL") else "8"
+    digit_match = re.search(r"\b([1-" + max_n + r"])\b", text.strip())
+    if digit_match and digit_match.group(1) in lookup:
+        return lookup[digit_match.group(1)]
+
+    # Step 2: normalize input and each scenario name, then try substring
+    # match and word-subset match (handles partial names and missing accents)
+    norm_input = _normalize_str(text)
     for key, name in lookup.items():
-        if key in t or key.replace("ú", "u").replace("ã", "a").replace("é", "e") in t:
+        if key.isdigit():
+            continue
+        norm_key = _normalize_str(key)
+        if norm_key in norm_input:
             return name
+        # Partial match: every word the user typed appears in the scenario name
+        input_words = set(norm_input.split())
+        if input_words and input_words.issubset(set(norm_key.split())):
+            return name
+
     return None
 
 
