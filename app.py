@@ -3,9 +3,8 @@ import importlib
 import re
 import unicodedata
 import streamlit as st
-from agents.pwf_agent import generate_dbar_block
+from agents.pwf_agent import generate_dbar_block, generate_statcom_block, generate_contingency_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
-from utils.anarede_lib import generate_dlin_block
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 
@@ -267,31 +266,87 @@ def _bess_pwf_lines(data: dict) -> str:
     except Exception:
         p = 0.0
 
-    # DBAR block — Q limits from calculate_q_limits(S_mva, P_mw)
-    dbar_block = generate_dbar_block(
-        bus_number=bus_to,
-        bus_name=f"BESS_{str(bus_from)[:5]}",
+    # DBAR + DLIN + FIM — generated entirely by anarede_lib, no LLM involvement
+    pwf_block = generate_dbar_block(
+        bus_number=bus_from,
+        bess_bus_number=bus_to,
         bus_type=mode_type,
         S_mva=s,
         P_mw=p,
-    )
-    # DLIN block — dummy branch from existing bus to new BESS bus
-    dlin_block = generate_dlin_block(
-        bus_from=bus_from,
-        bus_to=bus_to,
-        reactance=0.00001,
     )
     return (
         "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
         "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
         f"```\n"
-        f"{dbar_block}\n\n"
-        f"{dlin_block}\n\n"
-        f"FIM\n"
+        f"{pwf_block}\n"
         f"```\n\n"
         "Após inserir a BESS, o quadrado no canto superior direito mudará para "
         "**amarelo** ('Não Convergido'). Isso é normal."
     )
+
+
+def extract_sim_context(message: str) -> dict:
+    """
+    Scan a single message for signals from multiple simulation steps.
+    Returns a dict with keys:
+      convergence: 'green' | 'red' | None
+      lst:         'existing' | 'new' | None
+      bus_number:  str | None
+      bess_mode:   'PV' | 'PQ' | None
+    """
+    t = message.lower()
+
+    # Convergence
+    if _is_converged(message):
+        convergence = "green"
+    elif _is_not_converged(message):
+        convergence = "red"
+    else:
+        convergence = None
+
+    # LST
+    existing_signals = ["tenho", "existe", "já tenho", "ja tenho", "tenho lst",
+                        "carreguei", "existente", "tenho o arquivo", "tenho um"]
+    new_signals = ["não tenho", "nao tenho", "desenhar", "novo", "criar",
+                   "não tenho lst", "nao tenho lst"]
+    if any(s in t for s in new_signals):
+        lst = "new"
+    elif any(s in t for s in existing_signals):
+        lst = "existing"
+    else:
+        lst = None
+
+    # Bus number
+    bus_match = re.search(r"\b(?:barramento|mesma\s+barra|barra)\s+(\d{4,5})\b", t)
+    if bus_match:
+        bus_number = bus_match.group(1)
+    else:
+        bus_match = re.search(r"\b(\d{4,5})\b", message)
+        bus_number = bus_match.group(1) if bus_match else None
+
+    # BESS mode
+    bess_mode = _parse_bess_mode(message)
+
+    # S_mva — number immediately followed by "mva"
+    mva_match = re.search(r"(\d+(?:[.,]\d+)?)\s*mva", t)
+    S_mva = float(mva_match.group(1).replace(",", ".")) if mva_match else None
+
+    # P_mw — use existing helper first, then "N mw" standalone when S_mva present
+    p_mw_str = _parse_active_power(message)
+    if p_mw_str is None:
+        mw_match = re.search(r"(\d+(?:[.,]\d+)?)\s*mw\b", t)
+        if mw_match and (mva_match is None or mw_match.start() != mva_match.start()):
+            p_mw_str = mw_match.group(1).replace(",", ".")
+    P_mw = float(p_mw_str.replace(",", ".")) if p_mw_str else None
+
+    return {
+        "convergence": convergence,
+        "lst": lst,
+        "bus_number": bus_number,
+        "bess_mode": bess_mode,
+        "S_mva": S_mva,
+        "P_mw": P_mw,
+    }
 
 
 def _handle_sim_state(user_text: str) -> str | None:
@@ -381,23 +436,8 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # ── STEP 4: convergence check of base case ────────────────────────────────
     if step == "STEP4":
-        if _is_converged(user_text):
-            st.session_state.sim_step = "STEP6"
-            return (
-                "Perfeito! O caso base está convergido.\n\n"
-                "---\n\n"
-                "**Agora vamos preparar a visualização da região de estudo.**\n\n"
-                "A tela do ANAREDE está em branco. Para visualizar os resultados "
-                "graficamente, você precisa carregar ou desenhar um diagrama LST.\n\n"
-                "**Opção A** — Se já tiver um arquivo LST:\n"
-                "Vá em **Diagrama > Carregar** e selecione o arquivo LST.\n\n"
-                "**Opção B** — Se não tiver:\n"
-                "Clique no ícone do **lápis** no menu superior. Aparecerá um diálogo "
-                "com os elementos que podem ser modelados. Desenhe a região ao entorno "
-                "da barra que deseja estudar.\n\n"
-                "Qual opção você vai utilizar?"
-            )
-        elif _is_not_converged(user_text):
+        ctx = extract_sim_context(user_text)
+        if ctx["convergence"] == "red":
             return (
                 "O caso base não está convergido, o que é incomum pois os casos da "
                 "EPE e ONS já vêm convergidos. Verifique se:\n\n"
@@ -407,11 +447,140 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Tente recarregar o arquivo e informe novamente o que aparece "
                 "no canto superior direito."
             )
-        else:
+        if ctx["convergence"] != "green":
             return "O que aparece no canto superior direito do ANAREDE após carregar o caso?"
+
+        # Base case is converged — fast-forward as far as the message allows
+        converged_prefix = "Perfeito! O caso base está convergido.\n\n---\n\n"
+
+        # If bus number provided, skip straight to STEP7 (bus already known)
+        if ctx["bus_number"] is not None:
+            data["bess_bus"] = ctx["bus_number"]
+            if ctx["bess_mode"] is not None:
+                data["bess_mode"] = ctx["bess_mode"]
+                mode_label = "PV (controle de tensão)" if ctx["bess_mode"] == "PV" else "PQ (despacho fixo)"
+                if ctx["S_mva"] is not None:
+                    data["bess_mva"] = str(ctx["S_mva"])
+                    if ctx["P_mw"] is not None:
+                        data["bess_p_mw"] = str(ctx["P_mw"])
+                        st.session_state.sim_step = "STEP8"
+                        return (
+                            converged_prefix
+                            + f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
+                            f"potência **{ctx['S_mva']} MVA**, P ativa: **{ctx['P_mw']} MW** identificados.\n\n"
+                            "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                            "(escolha um número que não exista no caso atual)"
+                        )
+                    st.session_state.sim_step = "STEP8"
+                    return (
+                        converged_prefix
+                        + f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
+                        f"potência nominal **{ctx['S_mva']} MVA** registrada.\n\n"
+                        "**Qual a potência ativa em MW?**\n\n"
+                        "Os limites de potência reativa serão calculados: "
+                        "Q_max = √(S² − P²), Q_min = −Q_max"
+                    )
+                st.session_state.sim_step = "STEP8"
+                return (
+                    converged_prefix
+                    + f"Barra selecionada: **{ctx['bus_number']}** e modo **{mode_label}** identificados.\n\n"
+                    "**Qual a potência nominal da BESS em MVA?**\n\n"
+                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "Q_max = √(S² − P²), Q_min = −Q_max"
+                )
+            st.session_state.sim_step = "STEP7"
+            # bess_bus already set — jump to mode question
+            return (
+                converged_prefix
+                + f"Barra selecionada: **{ctx['bus_number']}**.\n\n"
+                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
+                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
+                "(resistência e susceptância zeradas).\n\n"
+                "**Qual o modo de operação da BESS?**\n\n"
+                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+                "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
+                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+            )
+
+        # No bus info — check LST choice
+        lst_question = (
+            "**Agora vamos preparar a visualização da região de estudo.**\n\n"
+            "A tela do ANAREDE está em branco. Para visualizar os resultados "
+            "graficamente, você precisa carregar ou desenhar um diagrama LST.\n\n"
+            "**Opção A** — Se já tiver um arquivo LST:\n"
+            "Vá em **Diagrama > Carregar** e selecione o arquivo LST.\n\n"
+            "**Opção B** — Se não tiver:\n"
+            "Clique no ícone do **lápis** no menu superior. Aparecerá um diálogo "
+            "com os elementos que podem ser modelados. Desenhe a região ao entorno "
+            "da barra que deseja estudar.\n\n"
+            "Qual opção você vai utilizar?"
+        )
+        if ctx["lst"] is not None:
+            # LST answered inline — skip STEP6 and go to STEP7
+            st.session_state.sim_step = "STEP7"
+            return (
+                converged_prefix
+                + "Ótimo! LST identificado.\n\n"
+                "**Agora vamos modelar a BESS.**\n\n"
+                "Qual é a barra onde deseja inserir a BESS?\n\n"
+                "Dica: escolha a subestação com maior carga na área de estudo "
+                "que disponha de margem para injeção de potência."
+            )
+
+        st.session_state.sim_step = "STEP6"
+        return converged_prefix + lst_question
 
     # ── STEP 6: LST diagram ───────────────────────────────────────────────────
     if step == "STEP6":
+        ctx = extract_sim_context(user_text)
+        # Fast-forward if bus number (and optionally mode) already provided
+        if ctx["bus_number"] is not None:
+            data["bess_bus"] = ctx["bus_number"]
+            if ctx["bess_mode"] is not None:
+                data["bess_mode"] = ctx["bess_mode"]
+                mode_label = "PV (controle de tensão)" if ctx["bess_mode"] == "PV" else "PQ (despacho fixo)"
+                if ctx["S_mva"] is not None:
+                    data["bess_mva"] = str(ctx["S_mva"])
+                    if ctx["P_mw"] is not None:
+                        data["bess_p_mw"] = str(ctx["P_mw"])
+                        st.session_state.sim_step = "STEP8"
+                        return (
+                            "Ótimo!\n\n"
+                            f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
+                            f"potência **{ctx['S_mva']} MVA**, P ativa: **{ctx['P_mw']} MW** identificados.\n\n"
+                            "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                            "(escolha um número que não exista no caso atual)"
+                        )
+                    st.session_state.sim_step = "STEP8"
+                    return (
+                        "Ótimo!\n\n"
+                        f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
+                        f"potência nominal **{ctx['S_mva']} MVA** registrada.\n\n"
+                        "**Qual a potência ativa em MW?**\n\n"
+                        "Os limites de potência reativa serão calculados: "
+                        "Q_max = √(S² − P²), Q_min = −Q_max"
+                    )
+                st.session_state.sim_step = "STEP8"
+                return (
+                    "Ótimo!\n\n"
+                    f"Barra selecionada: **{ctx['bus_number']}** e modo **{mode_label}** identificados.\n\n"
+                    "**Qual a potência nominal da BESS em MVA?**\n\n"
+                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "Q_max = √(S² − P²), Q_min = −Q_max"
+                )
+            st.session_state.sim_step = "STEP7"
+            # bess_bus already set — jump straight to mode question
+            return (
+                "Ótimo!\n\n"
+                f"Barra selecionada: **{ctx['bus_number']}**.\n\n"
+                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
+                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
+                "(resistência e susceptância zeradas).\n\n"
+                "**Qual o modo de operação da BESS?**\n\n"
+                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+                "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
+                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+            )
         st.session_state.sim_step = "STEP7"
         return (
             "Ótimo!\n\n"
@@ -441,6 +610,41 @@ def _handle_sim_state(user_text: str) -> str | None:
                         "ou nome da barra onde deseja inserir a BESS."
                     )
             bus = data["bess_bus"]
+            # Fast-forward to STEP8 if mode also provided in the same message
+            mode = _parse_bess_mode(user_text)
+            if mode is not None:
+                data["bess_mode"] = mode
+                mode_label = "PV (controle de tensão)" if mode == "PV" else "PQ (despacho fixo)"
+                ctx7 = extract_sim_context(user_text)
+                if ctx7["S_mva"] is not None:
+                    data["bess_mva"] = str(ctx7["S_mva"])
+                    if ctx7["P_mw"] is not None:
+                        data["bess_p_mw"] = str(ctx7["P_mw"])
+                        st.session_state.sim_step = "STEP8"
+                        return (
+                            f"Barra **{bus}**, modo **{mode_label}**, "
+                            f"potência **{ctx7['S_mva']} MVA**, P ativa: **{ctx7['P_mw']} MW** identificados.\n\n"
+                            "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                            "(escolha um número que não exista no caso atual)"
+                        )
+                    st.session_state.sim_step = "STEP8"
+                    return (
+                        f"Barra **{bus}**, modo **{mode_label}**, "
+                        f"potência nominal **{ctx7['S_mva']} MVA** registrada.\n\n"
+                        "**Qual a potência ativa em MW?**\n\n"
+                        "Os limites de potência reativa serão calculados: "
+                        "Q_max = √(S² − P²), Q_min = −Q_max"
+                    )
+                st.session_state.sim_step = "STEP8"
+                return (
+                    f"Barra selecionada: **{bus}** e modo **{mode_label}** identificados.\n\n"
+                    "**Qual a potência nominal da BESS em MVA?**\n\n"
+                    "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
+                    "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
+                    "- Para cada valor, verifique convergência e impactos no sistema\n\n"
+                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "Q_max = √(S² − P²), Q_min = −Q_max"
+                )
             return (
                 f"Barra selecionada: **{bus}**.\n\n"
                 "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
@@ -462,6 +666,25 @@ def _handle_sim_state(user_text: str) -> str | None:
                 )
             data["bess_mode"] = mode
             mode_label = "PV (controle de tensão)" if mode == "PV" else "PQ (despacho fixo)"
+            ctx7 = extract_sim_context(user_text)
+            if ctx7["S_mva"] is not None:
+                data["bess_mva"] = str(ctx7["S_mva"])
+                if ctx7["P_mw"] is not None:
+                    data["bess_p_mw"] = str(ctx7["P_mw"])
+                    st.session_state.sim_step = "STEP8"
+                    return (
+                        f"Modo **{mode_label}**, potência **{ctx7['S_mva']} MVA**, "
+                        f"P ativa: **{ctx7['P_mw']} MW** identificados.\n\n"
+                        "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                        "(escolha um número que não exista no caso atual)"
+                    )
+                st.session_state.sim_step = "STEP8"
+                return (
+                    f"Modo **{mode_label}**, potência nominal **{ctx7['S_mva']} MVA** registrada.\n\n"
+                    "**Qual a potência ativa em MW?**\n\n"
+                    "Os limites de potência reativa serão calculados: "
+                    "Q_max = √(S² − P²), Q_min = −Q_max"
+                )
             st.session_state.sim_step = "STEP8"
             return (
                 f"Modo selecionado: **{mode_label}**.\n\n"
@@ -476,7 +699,7 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── STEP 8: BESS power config ─────────────────────────────────────────────
     if step == "STEP8":
         if "bess_mva" not in data:
-            # Sub-step 8a: collect apparent power (S) and optional active power (P)
+            # Sub-step 8a: collect S_mva; advance only if P_mw also present
             mva = _parse_mva(user_text)
             if mva is None:
                 return "Não identifiquei a potência. Por favor, informe o valor em MVA (ex: **100**)."
@@ -484,14 +707,39 @@ def _handle_sim_state(user_text: str) -> str | None:
             p_mw = _parse_active_power(user_text)
             if p_mw is not None:
                 data["bess_p_mw"] = p_mw
-            p_info = f" (P ativa = {p_mw} MW)" if p_mw is not None else ""
+                return (
+                    f"Potência nominal: **{mva} MVA**, P ativa: **{p_mw} MW**.\n\n"
+                    "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                    "(escolha um número que não exista no caso atual)"
+                )
+            # P_mw not given yet — ask for it explicitly
             return (
-                f"Potência nominal: **{mva} MVA**{p_info}.\n\n"
+                f"Potência nominal: **{mva} MVA** registrada.\n\n"
+                "**Qual a potência ativa em MW?**\n\n"
+                "Os limites de potência reativa serão calculados: "
+                "Q_max = √(S² − P²), Q_min = −Q_max"
+            )
+        elif "bess_p_mw" not in data:
+            # Sub-step 8b: collect P_mw — this message is never treated as a bus number
+            p_mw = _parse_active_power(user_text)
+            if p_mw is None:
+                m = re.search(r"(\d+(?:[.,]\d+)?)\s*mw\b", user_text, re.IGNORECASE)
+                if m:
+                    p_mw = m.group(1).replace(",", ".")
+            if p_mw is None:
+                m = re.search(r"^\s*(\d+(?:[.,]\d+)?)\s*$", user_text.strip())
+                if m:
+                    p_mw = m.group(1).replace(",", ".")
+            if p_mw is None:
+                return "Não identifiquei a potência ativa. Por favor, informe em MW (ex: **80**)."
+            data["bess_p_mw"] = p_mw
+            return (
+                f"P ativa: **{p_mw} MW** registrada.\n\n"
                 "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
                 "(escolha um número que não exista no caso atual)"
             )
         else:
-            # Sub-step 8b: collect new BESS bus number, then generate output
+            # Sub-step 8c: both S_mva and P_mw confirmed — collect new BESS bus number
             bus_num_match = re.search(r"\b(\d{4,5})\b", user_text)
             if not bus_num_match:
                 return (
@@ -534,6 +782,7 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── STEP 10: convergence check of modified case ───────────────────────────
     if step == "STEP10":
         if _is_converged(user_text):
+            data.pop("divergence_color", None)
             st.session_state.sim_step = "STEP11"
             return (
                 "Ótimo! O caso convergiu.\n\n"
@@ -546,6 +795,14 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "O que você está observando no diagrama?"
             )
         elif _is_not_converged(user_text):
+            # Check if we already know the divergence color
+            if data.get("divergence_color") is None:
+                data["divergence_color"] = "unknown"
+                return (
+                    "O caso não convergiu. O que apareceu no canto superior direito?\n\n"
+                    "- **Vermelho**: o algoritmo divergiu\n"
+                    "- **Amarelo**: atingiu o limite de iterações sem convergir"
+                )
             return (
                 "O caso não convergiu. Vamos tentar resolver.\n\n"
                 "**PASSO 1** — Recarregue o caso salvo antes de rodar o fluxo:\n"
@@ -556,14 +813,147 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "a potência injetada até encontrar o limite que o sistema suporta.\n\n"
                 "Recarregue o caso e informe o que aparece no canto superior direito."
             )
+        elif data.get("divergence_color") == "unknown":
+            t = user_text.lower()
+            if "vermelho" in t or "red" in t or "divergiu" in t:
+                data["divergence_color"] = "red"
+                return (
+                    "**O fluxo divergiu (vermelho).** Causas prováveis:\n\n"
+                    "1. **Potência injetada muito alta** para a rede local\n"
+                    "   → Reduza P para 50% e tente novamente (Ctrl+R)\n\n"
+                    "2. **Geração reativa insuficiente** na barra\n"
+                    "   → Verifique se Qmax é adequado para a tensão local\n\n"
+                    "3. **Rede fraca na região**\n"
+                    "   → Tente modo PQ em vez de PV\n\n"
+                    "Recarregue o caso (Histórico > Operações > Restabelecer) "
+                    "e informe o que aparece após tentar novamente."
+                )
+            elif "amarelo" in t or "yellow" in t or "iteraç" in t or "limite" in t:
+                data["divergence_color"] = "yellow"
+                return (
+                    "**Limite de iterações atingido (amarelo).** Causas prováveis:\n\n"
+                    "1. **Número de iterações insuficiente**\n"
+                    "   → No ANAREDE: Análise > Cálculo de Fluxo de Potência\n"
+                    "     Aumente o número de iterações para **100**\n\n"
+                    "2. **Tensão inicial muito distante da solução**\n"
+                    "   → Ative a opção **FLAT** no código EXLF para partir de 1.0 pu\n\n"
+                    "3. **Controles conflitantes**\n"
+                    "   → Desative **CTAP** temporariamente e tente novamente\n\n"
+                    "Aplique os ajustes e informe o que aparece após rodar novamente."
+                )
+            else:
+                return (
+                    "Não identifiquei a cor. "
+                    "O indicador no canto superior direito ficou **vermelho** (divergiu) "
+                    "ou **amarelo** (limite de iterações)?"
+                )
         else:
             return "O que aparece no canto superior direito do ANAREDE após rodar o fluxo?"
 
     # ── STEP 11: results analysis ─────────────────────────────────────────────
     if step == "STEP11":
+        # Always advance regardless of message content — never re-ask "O que está observando?"
+        t = user_text.lower()
+        _RESULT_SIGNALS = [
+            "hachura", "vermelho", "azul", "sobrecarrega", "subtensão", "subtensao",
+            "sobretensão", "sobretensao", "estável", "estavel", "convergiu",
+            "impacto", "sem impacto", "observ", "diagrama",
+        ]
+        has_results = any(s in t for s in _RESULT_SIGNALS)
+        st.session_state.sim_step = "STEP11B"
+        ack = "Análise registrada.\n\n" if has_results else ""
+        return (
+            ack
+            + "Deseja realizar uma análise de contingências N-1 na região de estudo?\n\n"
+            "- **Sim** — vou te guiar pela configuração e execução das contingências no ANAREDE\n"
+            "- **Não** — seguimos para os próximos passos recomendados"
+        )
+
+    # ── STEP 11B: contingency guide ───────────────────────────────────────────
+    if step == "STEP11B":
+        t = user_text.lower()
+        # Check if user wants contingency analysis
+        if any(kw in t for kw in ["sim", "s", "quero", "gostaria", "contingência",
+                                   "contingencia", "n-1", "n1", "yes"]):
+            st.session_state.sim_data["contingency_stage"] = "guide"
+            return (
+                "Ótimo! Para análise de contingências N-1 no ANAREDE:\n\n"
+                "**1. Defina as contingências:**\n"
+                "Informe quais linhas ou geradores deseja testar. "
+                "Exemplo: 'linha 1001-1002 circuito 1' ou 'gerador barra 1005'.\n\n"
+                "**2. Execute o cálculo:**\n"
+                "No ANAREDE: **Análise > Contingências (EXCT)** ou pressione **Ctrl+E**.\n\n"
+                "**3. Interprete os resultados:**\n"
+                "- **Hachura VERMELHA** no diagrama: sobrecarga ou sobretensão na contingência\n"
+                "- **Hachura AZUL**: subtensão na contingência\n"
+                "- Sem hachura: sistema suporta a contingência\n\n"
+                "Quais linhas ou geradores deseja incluir na análise N-1?"
+            )
+        if any(kw in t for kw in ["não", "nao", "no", "pular", "skip"]):
+            st.session_state.sim_step = "STEP12"
+            return (
+                "**Próximos passos recomendados:**\n\n"
+                "1. Repetir esta simulação para outros patamares de carga e geração "
+                "(máxima noturna, mínima noturna, etc.)\n"
+                "2. Testar em outros anos do período escolhido\n"
+                "3. Simular contingências N-1 (desligamento de linhas e geradores) "
+                "na região de estudo\n"
+                "4. Após validar em regime permanente com ANAREDE, testar a solução "
+                "no ANATEM para verificar o desempenho dinâmico\n\n"
+                "Deseja continuar com outro cenário ou patamar de carga?"
+            )
+        # User provided contingency info — parse and generate DCTG block
+        if st.session_state.sim_data.get("contingency_stage") == "guide":
+            contingencies = []
+            # Parse lines: "linha XXXX-YYYY circuito N"
+            line_matches = re.findall(
+                r"linha\s+(\d{4,5})\s*[-–]\s*(\d{4,5})(?:\s+circuito\s*(\d+))?",
+                user_text, re.IGNORECASE
+            )
+            gen_matches = re.findall(
+                r"gerador\s+barra\s+(\d{4,5})",
+                user_text, re.IGNORECASE
+            )
+            ctg_id = 1
+            for m in line_matches:
+                bf, bt, ci = m
+                contingencies.append({
+                    "id": ctg_id,
+                    "name": f"LT {bf}-{bt} C{ci or '1'}",
+                    "type": "line",
+                    "bus_from": int(bf),
+                    "bus_to": int(bt),
+                    "circuit": int(ci) if ci else 1,
+                })
+                ctg_id += 1
+            for m in gen_matches:
+                contingencies.append({
+                    "id": ctg_id,
+                    "name": f"GER {m}",
+                    "type": "generator",
+                    "bus": int(m),
+                })
+                ctg_id += 1
+            if contingencies:
+                dctg_block = generate_contingency_block(contingencies)
+                st.session_state.sim_data["contingency_stage"] = "done"
+                return (
+                    f"Bloco DCTG gerado com **{len(contingencies)}** contingência(s):\n\n"
+                    f"```\n{dctg_block}\n```\n\n"
+                    "Carregue este bloco no ANAREDE e execute **Análise > Contingências (EXCT)** "
+                    "ou pressione **Ctrl+E**.\n\n"
+                    "Deseja continuar com mais cenários ou encerrar?"
+                )
+            # Could not parse — ask again
+            return (
+                "Não identifiquei linhas ou geradores na sua mensagem.\n\n"
+                "Por favor, use o formato:\n"
+                "- **linha XXXX-YYYY circuito N** (ex: linha 1001-1002 circuito 1)\n"
+                "- **gerador barra XXXXX** (ex: gerador barra 1005)"
+            )
+        # contingency_stage == "done" or not set — go to STEP12
         st.session_state.sim_step = "STEP12"
         return (
-            "Obrigado pela análise!\n\n"
             "**Próximos passos recomendados:**\n\n"
             "1. Repetir esta simulação para outros patamares de carga e geração "
             "(máxima noturna, mínima noturna, etc.)\n"
@@ -575,18 +965,135 @@ def _handle_sim_state(user_text: str) -> str | None:
             "Deseja continuar com outro cenário ou patamar de carga?"
         )
 
-    # ── STEP 12: offer next iteration ─────────────────────────────────────────
+    # ── STEP 12: awaiting continuation choice ─────────────────────────────────
     if step == "STEP12":
         t = user_text.lower()
-        if any(kw in t for kw in ["sim", "outro", "continuar", "próximo", "proximo", "outro cenário"]):
-            # Reset to STEP3 to pick a new scenario for the same year, or STEP2 for new year
+        db = data.get("db", "ONS")
+        max_scenario = 6 if db in ("ONS", "PARPEL") else 8
+
+        # Encerrar / não continuar
+        if any(kw in t for kw in ["não", "nao", "encerrar", "finalizar", "fim", "terminar", "acabou"]):
+            st.session_state.simulation_mode = False
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            return (
+                "Simulação encerrada. Os resultados ficam registrados no histórico acima.\n\n"
+                "Se precisar retomar ou tiver outras dúvidas sobre o SIN, é só perguntar."
+            )
+
+        # BUG 2a — Restart full simulation from STEP1
+        if any(kw in t for kw in ["quero simular", "simular novamente", "reiniciar",
+                                   "recomeçar", "recomecar", "nova simulação", "nova simulacao"]):
+            st.session_state.sim_data = {}
+            st.session_state.sim_step = "STEP1"
+            st.session_state.simulation_mode = True
+            return (
+                "**Qual base de dados deseja utilizar?**\n\n"
+                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos. "
+                "Modelos com maior incerteza sobre o futuro.\n\n"
+                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos. "
+                "Modelos mais detalhados e confiáveis para decisões operativas.\n\n"
+                "Para estudos de inserção de tecnologias como BESS no SIN, o "
+                "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
+            )
+
+        # BUG 2b — New year (2026–2040) → restart from STEP3 keeping same database
+        new_years = _parse_years(user_text)
+        if new_years and all(2026 <= y <= 2040 for y in new_years):
+            data["years"] = new_years
+            data["year_idx"] = 0
             data.pop("scenario", None)
+            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode"]:
+                data.pop(key, None)
             st.session_state.sim_step = "STEP3"
-            db = data.get("db", "ONS")
+            years_str = ", ".join(str(y) for y in new_years)
+            scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+            return f"Ano(s) atualizado(s): **{years_str}**.\n\n{scenarios}"
+
+        # BUG 2c — Mode/power input → resume BESS config from STEP7 or STEP8
+        ctx12 = extract_sim_context(user_text)
+        if ctx12["bess_mode"] is not None:
+            prev_bus = data.get("bess_bus")
+            for key in ["bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode"]:
+                data.pop(key, None)
+            data["bess_mode"] = ctx12["bess_mode"]
+            mode_label = "PV (controle de tensão)" if ctx12["bess_mode"] == "PV" else "PQ (despacho fixo)"
+            if ctx12["S_mva"] is not None:
+                data["bess_mva"] = str(ctx12["S_mva"])
+                if ctx12["P_mw"] is not None:
+                    data["bess_p_mw"] = str(ctx12["P_mw"])
+            if prev_bus is not None:
+                data["bess_bus"] = prev_bus
+                if ctx12["S_mva"] is not None:
+                    if ctx12["P_mw"] is not None:
+                        st.session_state.sim_step = "STEP8"
+                        return (
+                            f"Modo **{mode_label}**, potência **{ctx12['S_mva']} MVA**, "
+                            f"P ativa: **{ctx12['P_mw']} MW** identificados. "
+                            f"Mantendo barra **{prev_bus}** da simulação anterior.\n\n"
+                            "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
+                            "(escolha um número que não exista no caso atual)"
+                        )
+                    st.session_state.sim_step = "STEP8"
+                    return (
+                        f"Modo **{mode_label}**, potência nominal **{ctx12['S_mva']} MVA** registrada. "
+                        f"Mantendo barra **{prev_bus}** da simulação anterior.\n\n"
+                        "**Qual a potência ativa em MW?**\n\n"
+                        "Os limites de potência reativa serão calculados: "
+                        "Q_max = √(S² − P²), Q_min = −Q_max"
+                    )
+                st.session_state.sim_step = "STEP8"
+                return (
+                    f"Modo **{mode_label}** identificado. Mantendo barra **{prev_bus}**.\n\n"
+                    "**Qual a potência nominal da BESS em MVA?**\n\n"
+                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "Q_max = √(S² − P²), Q_min = −Q_max"
+                )
+            st.session_state.sim_step = "STEP7"
+            return (
+                f"Modo **{mode_label}** identificado.\n\n"
+                "**Qual é a barra onde deseja inserir a BESS?**"
+            )
+
+        # Scenario given directly (name or number) → treat as STEP3 answer
+        scenario = _parse_scenario(user_text, db)
+        if scenario is not None:
+            year = data["years"][data.get("year_idx", 0)]
+            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw",
+                        "bess_mode", "scenario"]:
+                data.pop(key, None)
+            data["scenario"] = scenario
+            data["year"] = year
+            st.session_state.sim_step = "STEP4"
+            return f"Cenário selecionado: **{scenario}** — ano **{year}**.\n\n" + _sav_filename_hint(db, scenario, year)
+
+        # Generic yes/continue → go to STEP3 and ask for scenario
+        if any(kw in t for kw in ["sim", "outro", "continuar", "próximo", "proximo",
+                                   "outro cenário", "outro cenario"]) or t.strip() in ("s", "sim"):
+            data.pop("scenario", None)
+            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode"]:
+                data.pop(key, None)
+            st.session_state.sim_step = "STEP3"
             scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
             return "Qual cenário deseja estudar agora?\n\n" + scenarios
-        # Let LLM handle general questions
-        return None
+
+        # BUG 3 — Standalone number outside scenario range → disambiguation
+        lone_num = re.search(r"^\s*(\d+)\s*$", user_text.strip())
+        if lone_num:
+            num_val = int(lone_num.group(1))
+            if num_val > max_scenario:
+                return (
+                    f"Não reconheci esse valor. Deseja selecionar um cenário (1–{max_scenario}), "
+                    "informar um novo ano, ou encerrar?"
+                )
+
+        # Anything else: re-ask the continuation question (never fall to RAG)
+        return (
+            "Deseja continuar com outro cenário ou patamar de carga?\n\n"
+            "- Responda com o **nome ou número do cenário** para ir direto\n"
+            "- Informe um **novo ano** (2026–2040) para trocar o horizonte\n"
+            "- **Encerrar** para finalizar a sessão de simulação"
+        )
 
     return None  # fallback to LLM
 
@@ -620,8 +1127,9 @@ with st.sidebar:
             "STEP8":  "STEP 8: Potência BESS",
             "STEP9":  "STEP 9: Salvar caso",
             "STEP10": "STEP 10: Rodar fluxo",
-            "STEP11": "STEP 11: Resultados",
-            "STEP12": "STEP 12: Próximos passos",
+            "STEP11":  "STEP 11: Resultados",
+            "STEP11B": "STEP 11B: Contingências N-1",
+            "STEP12":  "STEP 12: Próximos passos",
         }.get(st.session_state.sim_step, "")
         st.success(f"🔬 Modo: Guia de Simulação\n{step_label}")
     else:
@@ -681,6 +1189,9 @@ if prompt:
 
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
+    # Track last question for context restoration after free LLM answers
+    if sim_response is not None:
+        st.session_state.sim_data["last_step_question"] = sim_response
 
     with st.chat_message("assistant"):
         if sim_response is not None:
@@ -700,13 +1211,23 @@ if prompt:
             study_context = st.session_state.study.summary()
             full_prompt = prompt
 
+            # Inject simulation context if mid-simulation
+            active_step = st.session_state.sim_step
+            sim_context_note = ""
+            if active_step not in ("IDLE", "STEP12"):
+                last_q = st.session_state.sim_data.get("last_step_question", "")
+                sim_context_note = (
+                    f"\n\n---\n↩️ **Voltando à simulação** — {last_q}"
+                    if last_q else ""
+                )
+
             with st.spinner("Consultando base de conhecimento..."):
                 try:
                     result = st.session_state.chain.invoke({
                         "question": full_prompt,
                         "study_context": study_context,
                     })
-                    answer = result["answer"]
+                    answer = result["answer"] + sim_context_note
                     sources = list({
                         doc.metadata.get("source", "desconhecido")
                         for doc in result.get("source_documents", [])
@@ -715,7 +1236,7 @@ if prompt:
                     answer = (
                         f"Ocorreu um erro ao processar sua pergunta: `{e}`\n\n"
                         "Verifique se o Qdrant e o Ollama estão acessíveis."
-                    )
+                    ) + sim_context_note
                     sources = []
 
             st.markdown(answer)
