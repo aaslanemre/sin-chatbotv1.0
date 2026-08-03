@@ -1452,8 +1452,6 @@ if st.session_state.chain is None and st.session_state.chain_error is None:
 with st.sidebar:
     _user = st.session_state["user"]
     st.markdown(f"**{_user.get('full_name', '')}** ({_user.get('email', '')})")
-    if _user.get("role") == "admin":
-        st.page_link("pages/admin.py", label="Painel Admin", icon="🔧")
     if st.button("Sair", use_container_width=True):
         st.session_state.clear()
         st.rerun()

@@ -35,6 +35,35 @@ def signup(email: str, password: str, full_name: str, access_code: str) -> dict:
         conn.close()
 
 
+def signup_admin(email: str, password: str, full_name: str, admin_code: str) -> dict:
+    expected_code = os.getenv("ADMIN_ACCESS_CODE", "")
+    if not expected_code or admin_code != expected_code:
+        return {"ok": False, "error": "Codigo de acesso de administrador invalido."}
+
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        cur.execute(
+            """INSERT INTO users (email, password_hash, full_name, role, verified)
+               VALUES (%s, %s, %s, 'admin', true)
+               RETURNING id, email, full_name, role, verified, created_at""",
+            (email, password_hash, full_name),
+        )
+        user = dict(cur.fetchone())
+        user["id"] = str(user["id"])
+        conn.commit()
+        return {"ok": True, "user": user}
+    except Exception as e:
+        conn.rollback()
+        if "unique" in str(e).lower():
+            return {"ok": False, "error": "Email ja cadastrado."}
+        return {"ok": False, "error": str(e)}
+    finally:
+        cur.close()
+        conn.close()
+
+
 def login(email: str, password: str) -> dict | None:
     conn = get_connection()
     cur = get_cursor(conn)
