@@ -1,19 +1,78 @@
 import hashlib
 import importlib
 import re
+import uuid
 import unicodedata
 import streamlit as st
 from agents.pwf_agent import generate_dbar_block, generate_statcom_block, generate_contingency_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
+from auth.db import init_db
+from auth.auth_service import signup, login, log_chat_message
 
 st.set_page_config(
-    page_title="Assistente SIN v3.0",
+    page_title="Assistente SIN v5.1",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
 )
+
+# ── Initialize database tables ────────────────────────────────────────────────
+if "db_initialized" not in st.session_state:
+    try:
+        init_db()
+        st.session_state.db_initialized = True
+    except Exception as e:
+        st.session_state.db_initialized = False
+        st.session_state.db_init_error = str(e)
+
+# ── Authentication gate ──────────────────────────────────────────────────────
+if "user" not in st.session_state:
+    st.markdown("### Assistente SIN")
+    if not st.session_state.get("db_initialized"):
+        st.error(
+            f"Banco de dados indisponivel: `{st.session_state.get('db_init_error', 'desconhecido')}`\n\n"
+            "Verifique se o PostgreSQL esta rodando: `docker-compose up -d`"
+        )
+        st.stop()
+
+    tab_login, tab_signup = st.tabs(["Entrar", "Criar conta"])
+    with tab_login:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Senha", type="password")
+            submitted = st.form_submit_button("Entrar")
+            if submitted:
+                user = login(email, password)
+                if user:
+                    st.session_state["user"] = user
+                    st.session_state["session_id"] = str(uuid.uuid4())
+                    st.rerun()
+                else:
+                    st.error("Email ou senha incorretos.")
+
+    with tab_signup:
+        with st.form("signup_form"):
+            s_email = st.text_input("Email", key="s_email")
+            s_name = st.text_input("Nome completo", key="s_name")
+            s_pass = st.text_input("Senha", type="password", key="s_pass")
+            s_pass2 = st.text_input("Confirmar senha", type="password", key="s_pass2")
+            s_submitted = st.form_submit_button("Criar conta")
+            if s_submitted:
+                if s_pass != s_pass2:
+                    st.error("As senhas nao coincidem.")
+                elif len(s_pass) < 6:
+                    st.error("A senha deve ter pelo menos 6 caracteres.")
+                else:
+                    result = signup(s_email, s_pass, s_name)
+                    if result["ok"]:
+                        st.session_state["user"] = result["user"]
+                        st.session_state["session_id"] = str(uuid.uuid4())
+                        st.rerun()
+                    else:
+                        st.error(result["error"])
+    st.stop()
 
 # Reload prompt module to pick up any edits without full server restart
 import prompts.system_prompt as _spm
@@ -349,6 +408,35 @@ def extract_sim_context(message: str) -> dict:
     }
 
 
+def _parse_q_limits(text: str):
+    """Parse Qmin and Qmax from text. Returns (q_min, q_max) or (None, None)."""
+    m_min = re.search(r"q(?:min|m[íi]n)[:\s]+(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    m_max = re.search(r"q(?:max|m[áa]x)[:\s]+(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if m_min and m_max:
+        return float(m_min.group(1).replace(",", ".")), float(m_max.group(1).replace(",", "."))
+    # Try "-60 a 60" or "-60/60"
+    m = re.search(r"(-?\d+(?:[.,]\d+)?)\s*(?:a|/)\s*(\d+(?:[.,]\d+)?)", text)
+    if m:
+        return float(m.group(1).replace(",", ".")), float(m.group(2).replace(",", "."))
+    return None, None
+
+
+def _is_free_question(text: str) -> bool:
+    """Return True if the message looks like a free technical question, not a simulation step answer."""
+    t = text.strip()
+    if t.endswith("?"):
+        return True
+    tl = t.lower()
+    _STARTERS = [
+        "o que é", "o que são", "o que significa", "o que faz",
+        "como funciona", "como é", "como se", "como fazer", "como posso",
+        "por que", "porque", "qual é a diferença", "quais são",
+        "me explique", "explique", "me fale sobre", "fale sobre",
+        "você pode explicar", "pode me explicar", "pode me dizer",
+    ]
+    return any(tl.startswith(s) for s in _STARTERS)
+
+
 def _handle_sim_state(user_text: str) -> str | None:
     """
     Drive the simulation state machine.
@@ -357,11 +445,49 @@ def _handle_sim_state(user_text: str) -> str | None:
     step = st.session_state.sim_step
     data = st.session_state.sim_data
 
+    # If mid-simulation and user asked a free question, let LLM handle it
+    # (simulation state is preserved; ↩️ reminder appended by the LLM branch)
+    if step not in ("IDLE", "STEP12") and _is_free_question(user_text):
+        return None
+
+    # ── Global: encerrar / restart checks (before any step logic) ─────────────
+    t_lower = user_text.lower()
+    _ENCERRAR = ["encerrar", "finalizar", "terminar", "fim", "sair", "encerra", "finaliza"]
+    if step not in ("IDLE", "STEP12") and any(s in t_lower for s in _ENCERRAR):
+        st.session_state.simulation_mode = False
+        st.session_state.sim_step = "IDLE"
+        st.session_state.sim_data = {}
+        return (
+            "Sessão de simulação encerrada. Os resultados ficam registrados no histórico acima.\n\n"
+            "Se precisar retomar ou tiver dúvidas sobre o SIN, é só perguntar."
+        )
+
+    _RESTART = [
+        "quero simular", "iniciar simulação", "nova simulação",
+        "começar de novo", "quero inserir um bess", "quero inserir um statcom",
+    ]
+    if step not in ("IDLE",) and any(s in t_lower for s in _RESTART):
+        _restart_type = "STATCOM" if "statcom" in t_lower else "BESS"
+        st.session_state.sim_data = {"sim_type": _restart_type}
+        st.session_state.sim_step = "STEP1"
+        st.session_state.simulation_mode = True
+        return (
+            "Reiniciando a simulação do zero!\n\n"
+            "Antes de começarmos, você vai precisar baixar os arquivos da base "
+            "de dados. Existem duas fontes principais:\n\n"
+            "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos.\n\n"
+            "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos.\n\n"
+            "**Qual base de dados deseja utilizar?**\n\n"
+            "1. **EPE (PDE)** — planejamento de expansão de longo prazo (~10 anos)\n\n"
+            "2. **ONS (PAR/PEL)** — planejamento operacional de médio prazo (~5 anos)"
+        )
+
     # ── IDLE: check for simulation intent ─────────────────────────────────────
     if step == "IDLE":
         if _is_simulation_intent(user_text):
             st.session_state.simulation_mode = True
             st.session_state.sim_step = "STEP1"
+            data["sim_type"] = "STATCOM" if "statcom" in user_text.lower() else "BESS"
             return (
                 "Ótimo! Vou te guiar pelo processo de simulação passo a passo.\n\n"
                 "Antes de começarmos, você vai precisar baixar os arquivos da base "
@@ -452,9 +578,11 @@ def _handle_sim_state(user_text: str) -> str | None:
 
         # Base case is converged — fast-forward as far as the message allows
         converged_prefix = "Perfeito! O caso base está convergido.\n\n---\n\n"
+        sim_type = data.get("sim_type", "BESS")
+        device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
 
-        # If bus number provided, skip straight to STEP7 (bus already known)
-        if ctx["bus_number"] is not None:
+        # If bus number provided, skip straight to STEP7 — BESS only
+        if sim_type == "BESS" and ctx["bus_number"] is not None:
             data["bess_bus"] = ctx["bus_number"]
             if ctx["bess_mode"] is not None:
                 data["bess_mode"] = ctx["bess_mode"]
@@ -520,9 +648,9 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "STEP7"
             return (
                 converged_prefix
-                + "Ótimo! LST identificado.\n\n"
-                "**Agora vamos modelar a BESS.**\n\n"
-                "Qual é a barra onde deseja inserir a BESS?\n\n"
+                + f"Ótimo! LST identificado.\n\n"
+                f"**Agora vamos modelar o {device_label}.**\n\n"
+                f"Qual é a barra onde deseja inserir o {device_label}?\n\n"
                 "Dica: escolha a subestação com maior carga na área de estudo "
                 "que disponha de margem para injeção de potência."
             )
@@ -532,9 +660,11 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # ── STEP 6: LST diagram ───────────────────────────────────────────────────
     if step == "STEP6":
+        sim_type = data.get("sim_type", "BESS")
+        device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
         ctx = extract_sim_context(user_text)
-        # Fast-forward if bus number (and optionally mode) already provided
-        if ctx["bus_number"] is not None:
+        # Fast-forward if bus number (and optionally mode) already provided — BESS only
+        if sim_type == "BESS" and ctx["bus_number"] is not None:
             data["bess_bus"] = ctx["bus_number"]
             if ctx["bess_mode"] is not None:
                 data["bess_mode"] = ctx["bess_mode"]
@@ -584,16 +714,38 @@ def _handle_sim_state(user_text: str) -> str | None:
         st.session_state.sim_step = "STEP7"
         return (
             "Ótimo!\n\n"
-            "**Agora vamos modelar a BESS.**\n\n"
-            "Qual é a barra onde deseja inserir a BESS?\n\n"
-            "Dica: escolha a subestação com maior carga na área de estudo "
-            "que disponha de margem para injeção de potência. O ONS disponibiliza "
-            "mapas interativos e relatórios indicando a margem de escoamento de "
-            "geração das subestações da rede básica."
+            f"**Agora vamos modelar o {device_label}.**\n\n"
+            f"Qual é a barra onde deseja inserir o {device_label}?\n\n"
+            + (
+                "Dica: escolha a subestação com maior carga na área de estudo "
+                "que disponha de margem para injeção de potência. O ONS disponibiliza "
+                "mapas interativos e relatórios indicando a margem de escoamento de "
+                "geração das subestações da rede básica."
+                if sim_type == "BESS" else
+                "Dica: escolha a subestação com problema de tensão que o STATCOM deve regular."
+            )
         )
 
-    # ── STEP 7: bus identification + BESS mode ───────────────────────────────
+    # ── STEP 7: bus identification ────────────────────────────────────────────
     if step == "STEP7":
+        sim_type = data.get("sim_type", "BESS")
+        # ── STATCOM path: just ask for bus, then Q limits ─────────────────────
+        if sim_type == "STATCOM":
+            bus_match = re.search(r"\b(\d{4,5})\b", user_text)
+            if bus_match:
+                data["statcom_bus"] = bus_match.group(1)
+            elif len(user_text.strip()) >= 2:
+                data["statcom_bus"] = user_text.strip()
+            else:
+                return "Qual é a barra onde deseja inserir o STATCOM?"
+            st.session_state.sim_step = "STATCOM_STEP_Q"
+            return (
+                f"Barra selecionada: **{data['statcom_bus']}**.\n\n"
+                "**Qual a capacidade reativa do STATCOM?**\n\n"
+                "Informe Qmin e Qmax em Mvar.\n\n"
+                "Exemplo: `Qmin -100 Mvar, Qmax 100 Mvar`"
+            )
+        # ── BESS path ─────────────────────────────────────────────────────────
         if "bess_bus" not in data:
             # Parse bus from user message — accept any number or name
             bus_match = re.search(r"\b(\d{4,5})\b", user_text)
@@ -787,32 +939,14 @@ def _handle_sim_state(user_text: str) -> str | None:
             return (
                 "Ótimo! O caso convergiu.\n\n"
                 "Salve o caso convergido (pode sobrescrever o caso salvo no passo anterior).\n\n"
-                "**Para verificar o impacto da BESS no diagrama:**\n"
+                "**Para verificar o impacto no diagrama:**\n"
                 "- Sobrecargas e sobretensões aparecem com **hachura VERMELHA**\n"
                 "- Subtensões aparecem com **hachura AZUL**\n"
                 "- Verifique também os impactos na barra de referência e nas "
                 "principais barras de geração do SIN\n\n"
                 "O que você está observando no diagrama?"
             )
-        elif _is_not_converged(user_text):
-            # Check if we already know the divergence color
-            if data.get("divergence_color") is None:
-                data["divergence_color"] = "unknown"
-                return (
-                    "O caso não convergiu. O que apareceu no canto superior direito?\n\n"
-                    "- **Vermelho**: o algoritmo divergiu\n"
-                    "- **Amarelo**: atingiu o limite de iterações sem convergir"
-                )
-            return (
-                "O caso não convergiu. Vamos tentar resolver.\n\n"
-                "**PASSO 1** — Recarregue o caso salvo antes de rodar o fluxo:\n"
-                "Histórico > Operações > selecione o caso salvo > Restabelecer\n\n"
-                "**PASSO 2** — Reduza a injeção de potência ativa da BESS para um "
-                "valor próximo de zero e rode novamente (Ctrl + R).\n\n"
-                "**PASSO 3** — Se convergiu com valor baixo, aumente gradualmente "
-                "a potência injetada até encontrar o limite que o sistema suporta.\n\n"
-                "Recarregue o caso e informe o que aparece no canto superior direito."
-            )
+        # ── Already asked for color — detect vermelho vs amarelo first ────────
         elif data.get("divergence_color") == "unknown":
             t = user_text.lower()
             if "vermelho" in t or "red" in t or "divergiu" in t:
@@ -831,15 +965,19 @@ def _handle_sim_state(user_text: str) -> str | None:
             elif "amarelo" in t or "yellow" in t or "iteraç" in t or "limite" in t:
                 data["divergence_color"] = "yellow"
                 return (
-                    "**Limite de iterações atingido (amarelo).** Causas prováveis:\n\n"
-                    "1. **Número de iterações insuficiente**\n"
-                    "   → No ANAREDE: Análise > Cálculo de Fluxo de Potência\n"
-                    "     Aumente o número de iterações para **100**\n\n"
-                    "2. **Tensão inicial muito distante da solução**\n"
-                    "   → Ative a opção **FLAT** no código EXLF para partir de 1.0 pu\n\n"
-                    "3. **Controles conflitantes**\n"
-                    "   → Desative **CTAP** temporariamente e tente novamente\n\n"
-                    "Aplique os ajustes e informe o que aparece após rodar novamente."
+                    "O caso atingiu o limite de iterações sem convergir. "
+                    "Isso geralmente indica convergência lenta, não instabilidade numérica. Tente:\n\n"
+                    "**PASSO 1 — Aumente o número de iterações no ANAREDE:**\n"
+                    "Análise > Cálculo de Fluxo de Potência > campo 'Número de Iterações' "
+                    "→ aumente para 100 ou 200.\n\n"
+                    "**PASSO 2 — Ative o flat start:**\n"
+                    "No código EXLF, ative a opção FLAT para inicializar todas as tensões "
+                    "em 1.0 pu e ângulos em zero.\n\n"
+                    "**PASSO 3 — Desative controles temporariamente:**\n"
+                    "No código EXLF, desative CTAP (controle automático de tap) e CREM "
+                    "(controle remoto de tensão) e tente convergir primeiro sem eles.\n\n"
+                    "**PASSO 4 — Se ainda não convergir:**\n"
+                    "Reduza a potência ativa da BESS para 50% e tente novamente com os passos acima."
                 )
             else:
                 return (
@@ -847,19 +985,42 @@ def _handle_sim_state(user_text: str) -> str | None:
                     "O indicador no canto superior direito ficou **vermelho** (divergiu) "
                     "ou **amarelo** (limite de iterações)?"
                 )
+        # ── First time hearing about non-convergence — ask for color ──────────
+        elif _is_not_converged(user_text):
+            data["divergence_color"] = "unknown"
+            return (
+                "O caso não convergiu. O que apareceu no canto superior direito?\n\n"
+                "- **Vermelho**: o algoritmo divergiu\n"
+                "- **Amarelo**: atingiu o limite de iterações sem convergir"
+            )
+        elif data.get("divergence_color") in ("red", "yellow"):
+            # Known color, still not converging — generic retry tips
+            return (
+                "O caso não convergiu. Vamos tentar resolver.\n\n"
+                "**PASSO 1** — Recarregue o caso salvo antes de rodar o fluxo:\n"
+                "Histórico > Operações > selecione o caso salvo > Restabelecer\n\n"
+                "**PASSO 2** — Reduza a injeção de potência ativa da BESS para um "
+                "valor próximo de zero e rode novamente (Ctrl + R).\n\n"
+                "**PASSO 3** — Se convergiu com valor baixo, aumente gradualmente "
+                "a potência injetada até encontrar o limite que o sistema suporta.\n\n"
+                "Recarregue o caso e informe o que aparece no canto superior direito."
+            )
         else:
             return "O que aparece no canto superior direito do ANAREDE após rodar o fluxo?"
 
     # ── STEP 11: results analysis ─────────────────────────────────────────────
     if step == "STEP11":
-        # Always advance regardless of message content — never re-ask "O que está observando?"
         t = user_text.lower()
         _RESULT_SIGNALS = [
             "hachura", "vermelho", "azul", "sobrecarrega", "subtensão", "subtensao",
             "sobretensão", "sobretensao", "estável", "estavel", "convergiu",
-            "impacto", "sem impacto", "observ", "diagrama",
+            "impacto", "sem impacto", "observ", "diagrama", "nada", "ok", "sim",
+            "não vi", "nao vi", "normal", "tudo", "sem problema",
         ]
         has_results = any(s in t for s in _RESULT_SIGNALS)
+        if not has_results:
+            # Nothing recognisable — let LLM answer and keep step at STEP11
+            return None
         st.session_state.sim_step = "STEP11B"
         ack = "Análise registrada.\n\n" if has_results else ""
         return (
@@ -872,24 +1033,143 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── STEP 11B: contingency guide ───────────────────────────────────────────
     if step == "STEP11B":
         t = user_text.lower()
-        # Check if user wants contingency analysis
-        if any(kw in t for kw in ["sim", "s", "quero", "gostaria", "contingência",
-                                   "contingencia", "n-1", "n1", "yes"]):
-            st.session_state.sim_data["contingency_stage"] = "guide"
+        stage = st.session_state.sim_data.get("contingency_stage")
+
+        # ── Sub-state: waiting for yes/no (stage not yet set) ─────────────────
+        if stage is None:
+            if any(kw in t for kw in ["sim", "quero", "gostaria", "contingência",
+                                       "contingencia", "n-1", "n1", "yes"]):
+                st.session_state.sim_data["contingency_stage"] = "guide"
+                return (
+                    "Ótimo! Para análise de contingências N-1 no ANAREDE:\n\n"
+                    "**1. Execute o cálculo:**\n"
+                    "No ANAREDE: **Análise > Contingências (EXCT)** ou pressione **Ctrl+E**.\n\n"
+                    "**2. Interprete os resultados:**\n"
+                    "- **Hachura VERMELHA**: sobrecarga ou sobretensão na contingência\n"
+                    "- **Hachura AZUL**: subtensão na contingência\n"
+                    "- Sem hachura: sistema suporta a contingência\n\n"
+                    "Quais linhas ou geradores deseja incluir na análise N-1?\n\n"
+                    "Exemplos:\n"
+                    "- `linha 1001-1002 circuito 1`\n"
+                    "- `linha entre barras 1001 e 1002, circuito 1`\n"
+                    "- `gerador barra 1005`"
+                )
+            if any(kw in t for kw in ["não", "nao", "pular", "skip"]):
+                st.session_state.sim_step = "STEP12"
+                return (
+                    "**Próximos passos recomendados:**\n\n"
+                    "1. Repetir esta simulação para outros patamares de carga e geração "
+                    "(máxima noturna, mínima noturna, etc.)\n"
+                    "2. Testar em outros anos do período escolhido\n"
+                    "3. Simular contingências N-1 (desligamento de linhas e geradores) "
+                    "na região de estudo\n"
+                    "4. Após validar em regime permanente com ANAREDE, testar a solução "
+                    "no ANATEM para verificar o desempenho dinâmico\n\n"
+                    "Deseja continuar com outro cenário ou patamar de carga?"
+                )
             return (
-                "Ótimo! Para análise de contingências N-1 no ANAREDE:\n\n"
-                "**1. Defina as contingências:**\n"
-                "Informe quais linhas ou geradores deseja testar. "
-                "Exemplo: 'linha 1001-1002 circuito 1' ou 'gerador barra 1005'.\n\n"
-                "**2. Execute o cálculo:**\n"
-                "No ANAREDE: **Análise > Contingências (EXCT)** ou pressione **Ctrl+E**.\n\n"
-                "**3. Interprete os resultados:**\n"
-                "- **Hachura VERMELHA** no diagrama: sobrecarga ou sobretensão na contingência\n"
-                "- **Hachura AZUL**: subtensão na contingência\n"
-                "- Sem hachura: sistema suporta a contingência\n\n"
-                "Quais linhas ou geradores deseja incluir na análise N-1?"
+                "Deseja realizar análise de contingências N-1? "
+                "Responda **Sim** ou **Não**."
             )
-        if any(kw in t for kw in ["não", "nao", "no", "pular", "skip"]):
+
+        # ── Sub-state: waiting for contingency data ────────────────────────────
+        if stage == "guide":
+            contingencies = []
+            ctg_id = 1
+
+            # LINE patterns (in priority order — most specific first)
+            _LINE_PATS = [
+                # "linha entre barras 1001 e 1002, circuito 1"
+                r"linha\s+entre\s+barras?\s+(\d{4,5})\s+e\s+(\d{4,5})"
+                r"(?:[\s,]+circuito\s*(\d+))?",
+                # "linha 1001-1002 circuito 1"  or  "linha 1001–1002"
+                r"linha\s+(\d{4,5})\s*[-–]\s*(\d{4,5})"
+                r"(?:[\s,]+circuito\s*(\d+))?",
+                # "linha 1001 1002 circuito 1"
+                r"linha\s+(\d{4,5})\s+(\d{4,5})"
+                r"(?:[\s,]+circuito\s*(\d+))?",
+            ]
+            seen_lines = set()
+            for pat in _LINE_PATS:
+                for m in re.finditer(pat, user_text, re.IGNORECASE):
+                    key = (m.group(1), m.group(2))
+                    if key in seen_lines:
+                        continue
+                    seen_lines.add(key)
+                    bf, bt, ci = m.group(1), m.group(2), m.group(3)
+                    contingencies.append({
+                        "id": ctg_id,
+                        "name": f"LT {bf}-{bt}",
+                        "type": "line",
+                        "bus_from": int(bf),
+                        "bus_to": int(bt),
+                        "circuit": int(ci) if ci else 1,
+                    })
+                    ctg_id += 1
+
+            # GENERATOR patterns
+            _GEN_PATS = [
+                r"(?:gerador|gera[cç][aã]o)\s+barra\s+(\d{4,5})",
+                r"gerador\s+(\d{4,5})",
+            ]
+            seen_gens = set()
+            for pat in _GEN_PATS:
+                for m in re.finditer(pat, user_text, re.IGNORECASE):
+                    bus = m.group(1)
+                    if bus in seen_gens:
+                        continue
+                    seen_gens.add(bus)
+                    contingencies.append({
+                        "id": ctg_id,
+                        "name": f"GER {bus}",
+                        "type": "generator",
+                        "bus": int(bus),
+                    })
+                    ctg_id += 1
+
+            if contingencies:
+                dctg_block = generate_contingency_block(contingencies)
+                st.session_state.sim_data["contingency_stage"] = "done"
+                return (
+                    f"Bloco DCTG gerado com **{len(contingencies)}** "
+                    f"contingência(s):\n\n"
+                    f"```\n{dctg_block}\n```\n\n"
+                    "Carregue este bloco no ANAREDE antes de executar.\n\n"
+                    "**Deseja adicionar mais contingências ou podemos executar?**\n\n"
+                    "- **Executar agora** — pressione **Ctrl+E** no ANAREDE "
+                    "(Análise > Contingências > EXCT)\n"
+                    "- **Adicionar mais** — informe mais linhas ou geradores\n"
+                    "- **Encerrar contingências** — ir para os próximos passos"
+                )
+            return (
+                "Não identifiquei linhas ou geradores na mensagem.\n\n"
+                "Use um dos formatos:\n"
+                "- `linha 1001-1002 circuito 1`\n"
+                "- `linha entre barras 1001 e 1002, circuito 1`\n"
+                "- `gerador barra 1005`"
+            )
+
+        # ── Sub-state: done — waiting for next action ──────────────────────────
+        if stage == "done":
+            if any(kw in t for kw in ["executar", "ctrl", "exct", "rodar", "executar agora"]):
+                st.session_state.sim_data["contingency_stage"] = "awaiting_results"
+                return (
+                    "Pressione **Ctrl+E** no ANAREDE ou vá em "
+                    "**Análise > Contingências (EXCT)** para rodar a análise N-1.\n\n"
+                    "Após a execução, verifique o relatório de violações e o diagrama:\n"
+                    "- **Hachura VERMELHA**: sobrecarga ou sobretensão em alguma contingência\n"
+                    "- **Hachura AZUL**: subtensão em alguma contingência\n"
+                    "- Sem hachura: sistema robusto\n\n"
+                    "O que aparece no relatório e no diagrama?"
+                )
+            if any(kw in t for kw in ["adicionar", "mais", "outra", "outro"]):
+                st.session_state.sim_data["contingency_stage"] = "guide"
+                return (
+                    "Informe as próximas contingências:\n\n"
+                    "- `linha XXXX-YYYY circuito N`\n"
+                    "- `gerador barra XXXXX`"
+                )
+            # Default (encerrar / anything else) → next steps
             st.session_state.sim_step = "STEP12"
             return (
                 "**Próximos passos recomendados:**\n\n"
@@ -902,68 +1182,49 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "no ANATEM para verificar o desempenho dinâmico\n\n"
                 "Deseja continuar com outro cenário ou patamar de carga?"
             )
-        # User provided contingency info — parse and generate DCTG block
-        if st.session_state.sim_data.get("contingency_stage") == "guide":
-            contingencies = []
-            # Parse lines: "linha XXXX-YYYY circuito N"
-            line_matches = re.findall(
-                r"linha\s+(\d{4,5})\s*[-–]\s*(\d{4,5})(?:\s+circuito\s*(\d+))?",
-                user_text, re.IGNORECASE
-            )
-            gen_matches = re.findall(
-                r"gerador\s+barra\s+(\d{4,5})",
-                user_text, re.IGNORECASE
-            )
-            ctg_id = 1
-            for m in line_matches:
-                bf, bt, ci = m
-                contingencies.append({
-                    "id": ctg_id,
-                    "name": f"LT {bf}-{bt} C{ci or '1'}",
-                    "type": "line",
-                    "bus_from": int(bf),
-                    "bus_to": int(bt),
-                    "circuit": int(ci) if ci else 1,
-                })
-                ctg_id += 1
-            for m in gen_matches:
-                contingencies.append({
-                    "id": ctg_id,
-                    "name": f"GER {m}",
-                    "type": "generator",
-                    "bus": int(m),
-                })
-                ctg_id += 1
-            if contingencies:
-                dctg_block = generate_contingency_block(contingencies)
-                st.session_state.sim_data["contingency_stage"] = "done"
-                return (
-                    f"Bloco DCTG gerado com **{len(contingencies)}** contingência(s):\n\n"
-                    f"```\n{dctg_block}\n```\n\n"
-                    "Carregue este bloco no ANAREDE e execute **Análise > Contingências (EXCT)** "
-                    "ou pressione **Ctrl+E**.\n\n"
-                    "Deseja continuar com mais cenários ou encerrar?"
+
+        # ── Sub-state: awaiting N-1 results report ─────────────────────────────
+        if stage == "awaiting_results":
+            st.session_state.sim_step = "STEP12"
+            st.session_state.sim_data.pop("contingency_stage", None)
+            _OVERLOAD = ["sobrecarga", "vermelh", "overload", "sobrecarrega",
+                         "termicamente", "carregamento"]
+            _UNDERVOLT = ["subtensão", "subtensao", "azul", "queda de tensão",
+                          "queda de tensao", "tensão baixa"]
+            _STABLE    = ["sem hachura", "estável", "estavel", "suportou",
+                          "suporta", "sem violação", "sem violacao", "nada", "ok"]
+            if any(kw in t for kw in _OVERLOAD):
+                # Try to extract a mentioned line from the report
+                line_ref = re.search(r"linha\s+([\d\w][\d\w-]*)", user_text, re.IGNORECASE)
+                line_mention = f" na linha **{line_ref.group(1)}**" if line_ref else ""
+                interpretation = (
+                    f"**Sobrecarga detectada na contingência N-1{line_mention}.** "
+                    "Ao perder o elemento testado, a linha fica termicamente "
+                    "sobrecarregada. Ações recomendadas:\n\n"
+                    "1. Verificar se há reforço de rede planejado na região\n"
+                    "2. Avaliar redução da potência do BESS para aliviar o carregamento\n"
+                    "3. Registrar a violação no relatório de estudo"
                 )
-            # Could not parse — ask again
+            elif any(kw in t for kw in _UNDERVOLT):
+                interpretation = (
+                    "**Subtensão detectada na contingência N-1.** "
+                    "A perda do elemento causa queda de tensão abaixo do limite. "
+                    "Ações recomendadas:\n\n"
+                    "1. Avaliar aumento do suporte reativo na região\n"
+                    "2. Verificar se o BESS em modo PV pode compensar a queda\n"
+                    "3. Considerar instalação de banco de capacitores"
+                )
+            elif any(kw in t for kw in _STABLE):
+                interpretation = (
+                    "**Sistema robusto** — a contingência N-1 é suportada sem violações. "
+                    "O BESS não causa problemas de segurança na contingência testada."
+                )
+            else:
+                interpretation = "Resultado registrado."
             return (
-                "Não identifiquei linhas ou geradores na sua mensagem.\n\n"
-                "Por favor, use o formato:\n"
-                "- **linha XXXX-YYYY circuito N** (ex: linha 1001-1002 circuito 1)\n"
-                "- **gerador barra XXXXX** (ex: gerador barra 1005)"
+                interpretation + "\n\n---\n\n"
+                "Deseja continuar com outro cenário ou patamar de carga?"
             )
-        # contingency_stage == "done" or not set — go to STEP12
-        st.session_state.sim_step = "STEP12"
-        return (
-            "**Próximos passos recomendados:**\n\n"
-            "1. Repetir esta simulação para outros patamares de carga e geração "
-            "(máxima noturna, mínima noturna, etc.)\n"
-            "2. Testar em outros anos do período escolhido\n"
-            "3. Simular contingências N-1 (desligamento de linhas e geradores) "
-            "na região de estudo\n"
-            "4. Após validar em regime permanente com ANAREDE, testar a solução "
-            "no ANATEM para verificar o desempenho dinâmico\n\n"
-            "Deseja continuar com outro cenário ou patamar de carga?"
-        )
 
     # ── STEP 12: awaiting continuation choice ─────────────────────────────────
     if step == "STEP12":
@@ -1095,6 +1356,72 @@ def _handle_sim_state(user_text: str) -> str | None:
             "- **Encerrar** para finalizar a sessão de simulação"
         )
 
+    # ── STATCOM STEP Q: collect Q limits ─────────────────────────────────────
+    if step == "STATCOM_STEP_Q":
+        q_min, q_max = _parse_q_limits(user_text)
+        if q_min is None or q_max is None:
+            return (
+                "Não identifiquei os limites. Por favor, informe Qmin e Qmax em Mvar.\n\n"
+                "Exemplo: `Qmin -100 Mvar, Qmax 100 Mvar`"
+            )
+        data["statcom_q_min"] = q_min
+        data["statcom_q_max"] = q_max
+        st.session_state.sim_step = "STATCOM_STEP_CBUS"
+        return (
+            f"Limites reativos: **Qmin = {int(q_min)} Mvar**, **Qmax = {int(q_max)} Mvar**.\n\n"
+            "**O STATCOM vai controlar a tensão da própria barra ou de uma barra remota?**\n\n"
+            "1. **Barra local (padrão)** — STATCOM controla a tensão da própria barra\n"
+            "2. **Barra remota** — informe o número da barra a controlar"
+        )
+
+    # ── STATCOM STEP CBUS: controlled bus + generate output ──────────────────
+    if step == "STATCOM_STEP_CBUS":
+        t = user_text.lower().strip()
+        bus_str = data.get("statcom_bus", "99999")
+        q_min = data.get("statcom_q_min", -100.0)
+        q_max = data.get("statcom_q_max", 100.0)
+
+        controlled_bus = None
+        if t == "1" or any(w in t for w in ["local", "própria", "propria", "mesma"]):
+            controlled_bus = None
+            cb_label = f"barra local ({bus_str})"
+        else:
+            m = re.search(r"\b(\d{4,5})\b", user_text)
+            if m:
+                controlled_bus = int(m.group(1))
+                cb_label = f"barra remota **{controlled_bus}**"
+            else:
+                controlled_bus = None
+                cb_label = f"barra local ({bus_str})"
+
+        try:
+            bus_int = int(bus_str)
+        except (ValueError, TypeError):
+            bus_int = 99999
+
+        pwf_block = generate_statcom_block(
+            bus_number=bus_int,
+            q_min=q_min,
+            q_max=q_max,
+            controlled_bus=controlled_bus,
+        )
+        st.session_state.sim_step = "STEP9"
+        return (
+            f"Barra controlada: **{cb_label}**.\n\n"
+            "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
+            "salve como **STATCOM_modificacao.pwf** e carregue no ANAREDE:\n\n"
+            f"```\n{pwf_block}\n```\n\n"
+            "Após inserir o STATCOM, o quadrado no canto superior direito mudará para "
+            "**amarelo** ('Não Convergido'). Isso é normal.\n\n"
+            "---\n\n"
+            "**Antes de rodar o fluxo de potência, salve o caso com o STATCOM incluído.**\n\n"
+            "No ANAREDE:\n"
+            "1. Vá em **Histórico > Operações**\n"
+            "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
+            "3. Clique em **Salvar**\n\n"
+            "Confirme quando o caso estiver salvo."
+        )
+
     return None  # fallback to LLM
 
 
@@ -1115,6 +1442,15 @@ if st.session_state.chain is None and st.session_state.chain_error is None:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    _user = st.session_state["user"]
+    st.markdown(f"**{_user.get('full_name', '')}** ({_user.get('email', '')})")
+    if _user.get("role") == "admin":
+        st.page_link("pages/admin.py", label="Painel Admin", icon="🔧")
+    if st.button("Sair", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+    st.divider()
+
     if st.session_state.simulation_mode:
         step_label = {
             "IDLE":  "",
@@ -1123,8 +1459,10 @@ with st.sidebar:
             "STEP3":  "STEP 3: Cenário",
             "STEP4":  "STEP 4: Carregar SAV",
             "STEP6":  "STEP 6: Diagrama LST",
-            "STEP7":  "STEP 7: Barra / Modo BESS",
+            "STEP7":  "STEP 7: Barra",
             "STEP8":  "STEP 8: Potência BESS",
+            "STATCOM_STEP_Q":    "STATCOM: Limites reativos",
+            "STATCOM_STEP_CBUS": "STATCOM: Barra controlada",
             "STEP9":  "STEP 9: Salvar caso",
             "STEP10": "STEP 10: Rodar fluxo",
             "STEP11":  "STEP 11: Resultados",
@@ -1152,7 +1490,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v3.0 experimental")
+    st.caption("v5.1")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -1186,6 +1524,17 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
+
+    # Log user message
+    try:
+        log_chat_message(
+            st.session_state["user"]["id"],
+            st.session_state["session_id"],
+            "user", prompt,
+            st.session_state.get("sim_step"),
+        )
+    except Exception:
+        pass
 
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
@@ -1250,5 +1599,16 @@ if prompt:
         "content": answer,
         "sources": sources,
     })
+
+    # Log assistant message
+    try:
+        log_chat_message(
+            st.session_state["user"]["id"],
+            st.session_state["session_id"],
+            "assistant", answer,
+            st.session_state.get("sim_step"),
+        )
+    except Exception:
+        pass
 
     save_study(st.session_state.study)

@@ -7,5 +7,20 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sin_chatbot_postgres
+    environment:
+      POSTGRES_USER: sinchatbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_env}
+      POSTGRES_DB: sin_chatbot
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
 volumes:
   qdrant_data:
+  postgres_data:

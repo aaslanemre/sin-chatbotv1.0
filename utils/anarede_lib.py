@@ -137,6 +137,10 @@ def formatar_digitos_pexplic(elemento, tamanho):
     except ValueError:
         return texto[:tamanho].ljust(tamanho)
 
+    # Whole-number integers with no decimal point in input → right-justified integer, no decimal
+    if valor == int(valor) and '.' not in texto:
+        return str(int(valor)).rjust(tamanho)[:tamanho]
+
     espaco_sinal = 1 if valor < 0 else 0
     int_digitos = len(str(int(abs(valor))))
     casas_decimais = tamanho - int_digitos - espaco_sinal - 1
@@ -268,7 +272,7 @@ def Script_Inclui_DLIN(Script,
         unidades_operacao = str(vet_unidades_operacao[k]).rjust(3)
 
         resistencia = formatar_digitos_pexplic(resistencia, 6)
-        reatancia = formatar_digitos_pexplic(reatancia, 6)
+        reatancia = formatar_digitos_pexplic(reatancia, 8)
         suceptancia = formatar_digitos_pexplic(suceptancia, 6)
         tap = formatar_digitos_pexplic(tap, 5)
         tap_min = formatar_digitos_pexplic(tap_min, 5)
@@ -312,8 +316,8 @@ def Script_adiciona_LT(Script, Barra_De, Abertura_De, operacao,
               espaco[:1].rjust(1)            +\
               Barra_Para.rjust(5)            + circuito.rjust(2)                 +\
               estado.rjust(1)                + proprietario.rjust(1)             +\
-              espaco[:1].rjust(1)            + resistencia.rjust(6)              +\
-              reatancia.rjust(6)             + suceptancia.rjust(6)              +\
+              espaco[:1].rjust(1)            + resistencia.rjust(6)              + ' ' +\
+              reatancia.rjust(8)             + ' ' + suceptancia.rjust(6)        +\
               espaco[:20].rjust(20)          + espaco[:6].rjust(6)               +\
               Capacidade_Normal.rjust(4)     +\
               Capacidade_Emergencia.rjust(4) + espaco[:2].rjust(2)               +\
