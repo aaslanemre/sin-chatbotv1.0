@@ -34,11 +34,11 @@ def init_db():
             password_hash TEXT NOT NULL,
             full_name TEXT,
             role TEXT DEFAULT 'user',
-            verified BOOLEAN DEFAULT false,
+            verified BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT now(),
             last_login TIMESTAMP,
-            verification_token TEXT,
-            verification_sent_at TIMESTAMP
+            verification_token TEXT,      -- deprecated: kept for schema compat
+            verification_sent_at TIMESTAMP -- deprecated: kept for schema compat
         );
     """)
     # Add new columns if upgrading from v5.1
@@ -52,9 +52,9 @@ def init_db():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$;
         """)
-    # Flip default verified to false for new installs (existing rows unaffected)
+    # Access-code flow: all signups are verified=true immediately
     cur.execute("""
-        ALTER TABLE users ALTER COLUMN verified SET DEFAULT false;
+        ALTER TABLE users ALTER COLUMN verified SET DEFAULT true;
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_logs (

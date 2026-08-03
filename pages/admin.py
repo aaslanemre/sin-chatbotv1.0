@@ -20,7 +20,6 @@ from auth.auth_service import (
     demote_from_admin,
     delete_user,
     manually_verify_user,
-    resend_verification,
     get_chat_logs,
     get_all_documents,
     insert_document,
@@ -148,13 +147,7 @@ elif section == "Usuarios":
                         st.rerun()
 
             with col3:
-                if not selected_user["verified"]:
-                    if st.button("Reenviar email", key="resend_email"):
-                        r = resend_verification(selected_user["email"])
-                        if r["ok"]:
-                            st.success("Email reenviado.")
-                        else:
-                            st.error(r.get("error", "Erro ao reenviar."))
+                pass  # reserved for future actions
 
             with col4:
                 if selected_user["id"] != st.session_state["user"]["id"]:

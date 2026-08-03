@@ -1,41 +1,30 @@
+import os
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime
 from auth.db import get_connection, get_cursor
-from auth.email_service import generate_verification_token, send_verification_email
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
-def signup(email: str, password: str, full_name: str) -> dict:
+def signup(email: str, password: str, full_name: str, access_code: str) -> dict:
+    expected_code = os.getenv("ACCESS_CODE", "")
+    if not expected_code or access_code != expected_code:
+        return {"ok": False, "error": "Codigo de acesso invalido."}
+
     conn = get_connection()
     cur = get_cursor(conn)
     try:
         password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        token = generate_verification_token()
         cur.execute(
-            """INSERT INTO users (email, password_hash, full_name, verified,
-                                  verification_token, verification_sent_at)
-               VALUES (%s, %s, %s, false, %s, now())
+            """INSERT INTO users (email, password_hash, full_name, verified)
+               VALUES (%s, %s, %s, true)
                RETURNING id, email, full_name, role, verified, created_at""",
-            (email, password_hash, full_name, token),
+            (email, password_hash, full_name),
         )
         user = dict(cur.fetchone())
         user["id"] = str(user["id"])
         conn.commit()
-
-        # Try to send verification email; if it fails, account still exists
-        email_error = None
-        try:
-            send_verification_email(email, full_name, token)
-        except Exception as e:
-            email_error = str(e)
-
-        return {
-            "ok": True,
-            "user": user,
-            "email_sent": email_error is None,
-            "email_error": email_error,
-        }
+        return {"ok": True, "user": user}
     except Exception as e:
         conn.rollback()
         if "unique" in str(e).lower():
@@ -46,19 +35,16 @@ def signup(email: str, password: str, full_name: str) -> dict:
         conn.close()
 
 
-def login(email: str, password: str) -> dict:
-    """Returns dict with 'user' key on success, or 'error'/'unverified' keys on failure."""
+def login(email: str, password: str) -> dict | None:
     conn = get_connection()
     cur = get_cursor(conn)
     try:
         cur.execute("SELECT * FROM users WHERE email = %s", (email,))
         row = cur.fetchone()
         if row is None:
-            return {"error": "Email ou senha incorretos."}
+            return None
         if not bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
-            return {"error": "Email ou senha incorretos."}
-        if not row["verified"]:
-            return {"unverified": True, "email": email}
+            return None
         cur.execute(
             "UPDATE users SET last_login = %s WHERE id = %s",
             (datetime.utcnow(), row["id"]),
@@ -69,58 +55,7 @@ def login(email: str, password: str) -> dict:
         del user["password_hash"]
         user.pop("verification_token", None)
         user.pop("verification_sent_at", None)
-        return {"user": user}
-    finally:
-        cur.close()
-        conn.close()
-
-
-def verify_email(token: str) -> dict:
-    conn = get_connection()
-    cur = get_cursor(conn)
-    try:
-        cur.execute(
-            "SELECT id, verification_sent_at FROM users WHERE verification_token = %s",
-            (token,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return {"success": False, "error": "Token invalido."}
-        sent_at = row["verification_sent_at"]
-        if sent_at and (datetime.utcnow() - sent_at) > timedelta(hours=24):
-            return {"success": False, "error": "Token expirado. Solicite um novo email."}
-        cur.execute(
-            "UPDATE users SET verified = true, verification_token = NULL WHERE id = %s",
-            (row["id"],),
-        )
-        conn.commit()
-        return {"success": True}
-    finally:
-        cur.close()
-        conn.close()
-
-
-def resend_verification(email: str) -> dict:
-    conn = get_connection()
-    cur = get_cursor(conn)
-    try:
-        cur.execute("SELECT id, full_name, verified FROM users WHERE email = %s", (email,))
-        row = cur.fetchone()
-        if row is None:
-            return {"ok": False, "error": "Email nao encontrado."}
-        if row["verified"]:
-            return {"ok": False, "error": "Email ja verificado."}
-        token = generate_verification_token()
-        cur.execute(
-            "UPDATE users SET verification_token = %s, verification_sent_at = now() WHERE id = %s",
-            (token, row["id"]),
-        )
-        conn.commit()
-        try:
-            send_verification_email(email, row["full_name"] or "", token)
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": f"Erro ao enviar email: {e}"}
+        return user
     finally:
         cur.close()
         conn.close()

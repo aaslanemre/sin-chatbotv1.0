@@ -10,7 +10,7 @@ from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
 from auth.auth_service import (
-    signup, login, verify_email, resend_verification,
+    signup, login,
     log_chat_message, create_session, update_session,
 )
 
@@ -30,16 +30,6 @@ if "db_initialized" not in st.session_state:
         st.session_state.db_initialized = False
         st.session_state.db_init_error = str(e)
 
-# ── Email verification link handler ──────────────────────────────────────────
-query_params = st.query_params
-if "verify_token" in query_params:
-    _vr = verify_email(query_params["verify_token"])
-    if _vr["success"]:
-        st.success("Email confirmado! Voce ja pode fazer login.")
-    else:
-        st.error(_vr.get("error", "Link de verificacao invalido ou expirado."))
-    st.query_params.clear()
-
 # ── Authentication gate ──────────────────────────────────────────────────────
 if "user" not in st.session_state:
     st.markdown("### Assistente SIN")
@@ -57,30 +47,15 @@ if "user" not in st.session_state:
             password = st.text_input("Senha", type="password")
             submitted = st.form_submit_button("Entrar")
             if submitted:
-                result = login(email, password)
-                if "user" in result:
-                    st.session_state["user"] = result["user"]
+                user = login(email, password)
+                if user:
+                    st.session_state["user"] = user
                     _sid = str(uuid.uuid4())
                     st.session_state["session_id"] = _sid
-                    create_session(_sid, result["user"]["id"])
+                    create_session(_sid, user["id"])
                     st.rerun()
-                elif result.get("unverified"):
-                    st.warning(
-                        "Confirme seu email antes de entrar. "
-                        "Nao recebeu o email de confirmacao?"
-                    )
-                    st.session_state["_resend_email"] = result["email"]
                 else:
-                    st.error(result.get("error", "Email ou senha incorretos."))
-
-        if st.session_state.get("_resend_email"):
-            if st.button("Reenviar email de confirmacao"):
-                _rr = resend_verification(st.session_state["_resend_email"])
-                if _rr["ok"]:
-                    st.success("Email reenviado! Verifique sua caixa de entrada.")
-                else:
-                    st.error(_rr.get("error", "Erro ao reenviar."))
-                st.session_state.pop("_resend_email", None)
+                    st.error("Email ou senha incorretos.")
 
     with tab_signup:
         with st.form("signup_form"):
@@ -88,6 +63,7 @@ if "user" not in st.session_state:
             s_name = st.text_input("Nome completo", key="s_name")
             s_pass = st.text_input("Senha", type="password", key="s_pass")
             s_pass2 = st.text_input("Confirmar senha", type="password", key="s_pass2")
+            s_code = st.text_input("Codigo de acesso", type="password", key="s_code")
             s_submitted = st.form_submit_button("Criar conta")
             if s_submitted:
                 if s_pass != s_pass2:
@@ -95,18 +71,13 @@ if "user" not in st.session_state:
                 elif len(s_pass) < 6:
                     st.error("A senha deve ter pelo menos 6 caracteres.")
                 else:
-                    result = signup(s_email, s_pass, s_name)
+                    result = signup(s_email, s_pass, s_name, s_code)
                     if result["ok"]:
-                        if result.get("email_sent"):
-                            st.success(
-                                "Conta criada! Verifique seu email para ativar a conta."
-                            )
-                        else:
-                            st.warning(
-                                "Conta criada, mas nao foi possivel enviar o email de verificacao. "
-                                f"Erro: {result.get('email_error', 'desconhecido')}. "
-                                "Contate o administrador para ativar sua conta manualmente."
-                            )
+                        st.session_state["user"] = result["user"]
+                        _sid = str(uuid.uuid4())
+                        st.session_state["session_id"] = _sid
+                        create_session(_sid, result["user"]["id"])
+                        st.rerun()
                     else:
                         st.error(result["error"])
     st.stop()

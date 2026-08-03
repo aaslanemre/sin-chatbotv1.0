@@ -15,4 +15,3 @@ uvicorn[standard]
 psycopg2-binary
 bcrypt
 pandas
-resend
