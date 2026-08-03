@@ -9,10 +9,13 @@ from agents.results_analyzer import save_results_file, check_convergence, format
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
-from auth.auth_service import signup, login, log_chat_message
+from auth.auth_service import (
+    signup, login, verify_email, resend_verification,
+    log_chat_message, create_session, update_session,
+)
 
 st.set_page_config(
-    page_title="Assistente SIN v5.1",
+    page_title="Assistente SIN v5.2",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -26,6 +29,16 @@ if "db_initialized" not in st.session_state:
     except Exception as e:
         st.session_state.db_initialized = False
         st.session_state.db_init_error = str(e)
+
+# ── Email verification link handler ──────────────────────────────────────────
+query_params = st.query_params
+if "verify_token" in query_params:
+    _vr = verify_email(query_params["verify_token"])
+    if _vr["success"]:
+        st.success("Email confirmado! Voce ja pode fazer login.")
+    else:
+        st.error(_vr.get("error", "Link de verificacao invalido ou expirado."))
+    st.query_params.clear()
 
 # ── Authentication gate ──────────────────────────────────────────────────────
 if "user" not in st.session_state:
@@ -44,13 +57,30 @@ if "user" not in st.session_state:
             password = st.text_input("Senha", type="password")
             submitted = st.form_submit_button("Entrar")
             if submitted:
-                user = login(email, password)
-                if user:
-                    st.session_state["user"] = user
-                    st.session_state["session_id"] = str(uuid.uuid4())
+                result = login(email, password)
+                if "user" in result:
+                    st.session_state["user"] = result["user"]
+                    _sid = str(uuid.uuid4())
+                    st.session_state["session_id"] = _sid
+                    create_session(_sid, result["user"]["id"])
                     st.rerun()
+                elif result.get("unverified"):
+                    st.warning(
+                        "Confirme seu email antes de entrar. "
+                        "Nao recebeu o email de confirmacao?"
+                    )
+                    st.session_state["_resend_email"] = result["email"]
                 else:
-                    st.error("Email ou senha incorretos.")
+                    st.error(result.get("error", "Email ou senha incorretos."))
+
+        if st.session_state.get("_resend_email"):
+            if st.button("Reenviar email de confirmacao"):
+                _rr = resend_verification(st.session_state["_resend_email"])
+                if _rr["ok"]:
+                    st.success("Email reenviado! Verifique sua caixa de entrada.")
+                else:
+                    st.error(_rr.get("error", "Erro ao reenviar."))
+                st.session_state.pop("_resend_email", None)
 
     with tab_signup:
         with st.form("signup_form"):
@@ -67,9 +97,16 @@ if "user" not in st.session_state:
                 else:
                     result = signup(s_email, s_pass, s_name)
                     if result["ok"]:
-                        st.session_state["user"] = result["user"]
-                        st.session_state["session_id"] = str(uuid.uuid4())
-                        st.rerun()
+                        if result.get("email_sent"):
+                            st.success(
+                                "Conta criada! Verifique seu email para ativar a conta."
+                            )
+                        else:
+                            st.warning(
+                                "Conta criada, mas nao foi possivel enviar o email de verificacao. "
+                                f"Erro: {result.get('email_error', 'desconhecido')}. "
+                                "Contate o administrador para ativar sua conta manualmente."
+                            )
                     else:
                         st.error(result["error"])
     st.stop()
@@ -1490,7 +1527,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v5.1")
+    st.caption("v5.2")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -1525,13 +1562,18 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Log user message
+    # Log user message + update session
     try:
         log_chat_message(
             st.session_state["user"]["id"],
             st.session_state["session_id"],
             "user", prompt,
             st.session_state.get("sim_step"),
+        )
+        update_session(
+            st.session_state["session_id"],
+            sim_type=st.session_state.sim_data.get("sim_type"),
+            sim_step=st.session_state.get("sim_step"),
         )
     except Exception:
         pass

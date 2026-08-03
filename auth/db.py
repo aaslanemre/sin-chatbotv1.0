@@ -34,10 +34,27 @@ def init_db():
             password_hash TEXT NOT NULL,
             full_name TEXT,
             role TEXT DEFAULT 'user',
-            verified BOOLEAN DEFAULT true,
+            verified BOOLEAN DEFAULT false,
             created_at TIMESTAMP DEFAULT now(),
-            last_login TIMESTAMP
+            last_login TIMESTAMP,
+            verification_token TEXT,
+            verification_sent_at TIMESTAMP
         );
+    """)
+    # Add new columns if upgrading from v5.1
+    for col, coltype in [
+        ("verification_token", "TEXT"),
+        ("verification_sent_at", "TIMESTAMP"),
+    ]:
+        cur.execute(f"""
+            DO $$ BEGIN
+                ALTER TABLE users ADD COLUMN {col} {coltype};
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
+    # Flip default verified to false for new installs (existing rows unaffected)
+    cur.execute("""
+        ALTER TABLE users ALTER COLUMN verified SET DEFAULT false;
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_logs (
@@ -58,6 +75,19 @@ def init_db():
             chunk_count INTEGER DEFAULT 0,
             qdrant_status TEXT DEFAULT 'processing',
             uploaded_at TIMESTAMP DEFAULT now()
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID REFERENCES users(id),
+            started_at TIMESTAMP DEFAULT now(),
+            last_message_at TIMESTAMP DEFAULT now(),
+            message_count INTEGER DEFAULT 0,
+            sim_type TEXT,
+            final_sim_step TEXT,
+            flagged BOOLEAN DEFAULT false,
+            flag_note TEXT
         );
     """)
     conn.commit()
