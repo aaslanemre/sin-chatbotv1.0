@@ -12,10 +12,11 @@ from auth.db import init_db
 from auth.auth_service import (
     signup, login,
     log_chat_message, create_session, update_session,
+    save_paused_state, load_paused_state, clear_paused_state,
 )
 
 st.set_page_config(
-    page_title="Assistente SIN v5.2",
+    page_title="Assistente SIN v5.3",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -53,6 +54,10 @@ if "user" not in st.session_state:
                     _sid = str(uuid.uuid4())
                     st.session_state["session_id"] = _sid
                     create_session(_sid, user["id"])
+                    # Check for paused simulation to offer resume
+                    paused = load_paused_state(user["id"])
+                    if paused:
+                        st.session_state["_pending_resume"] = paused
                     st.rerun()
                 else:
                     st.error("Email ou senha incorretos.")
@@ -128,6 +133,28 @@ if "sim_step" not in st.session_state:
 
 if "sim_data" not in st.session_state:
     st.session_state.sim_data = {}   # period, db, scenario, year
+
+if "sim_status" not in st.session_state:
+    st.session_state.sim_status = None   # None | "active" | "paused"
+
+# ── Auto-resume paused simulation on login ────────────────────────────────────
+if "_pending_resume" in st.session_state:
+    _pr = st.session_state.pop("_pending_resume")
+    st.session_state.sim_step = _pr["sim_step"]
+    st.session_state.sim_data = _pr["sim_data"]
+    st.session_state.simulation_mode = True
+    st.session_state.sim_status = "active"
+    clear_paused_state(_pr["session_id"])
+    _step_label = _pr["sim_step"]
+    _sim_type = _pr["sim_data"].get("sim_type", "BESS")
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": (
+            f"Bem-vindo de volta! Encontrei uma simulação pausada ({_sim_type}, etapa {_step_label}).\n\n"
+            "A simulação foi retomada automaticamente. Continue de onde parou, "
+            "ou digite **encerrar** para finalizar."
+        ),
+    })
 
 
 # ── Simulation state machine helpers ──────────────────────────────────────────
@@ -453,6 +480,26 @@ def _handle_sim_state(user_text: str) -> str | None:
     step = st.session_state.sim_step
     data = st.session_state.sim_data
 
+    # If simulation is paused, only IDLE intent detection should work
+    if st.session_state.sim_status == "paused" and step != "IDLE":
+        # Allow encerrar even while paused
+        t_lower = user_text.lower()
+        _ENCERRAR = ["encerrar", "finalizar", "terminar"]
+        if any(s in t_lower for s in _ENCERRAR):
+            st.session_state.simulation_mode = False
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            st.session_state.sim_status = None
+            try:
+                clear_paused_state(st.session_state["session_id"])
+            except Exception:
+                pass
+            return (
+                "Sessão de simulação encerrada.\n\n"
+                "Se precisar retomar ou tiver dúvidas sobre o SIN, é só perguntar."
+            )
+        return None  # Let LLM handle while paused
+
     # If mid-simulation and user asked a free question, let LLM handle it
     # (simulation state is preserved; ↩️ reminder appended by the LLM branch)
     if step not in ("IDLE", "STEP12") and _is_free_question(user_text):
@@ -465,6 +512,11 @@ def _handle_sim_state(user_text: str) -> str | None:
         st.session_state.simulation_mode = False
         st.session_state.sim_step = "IDLE"
         st.session_state.sim_data = {}
+        st.session_state.sim_status = None
+        try:
+            clear_paused_state(st.session_state["session_id"])
+        except Exception:
+            pass
         return (
             "Sessão de simulação encerrada. Os resultados ficam registrados no histórico acima.\n\n"
             "Se precisar retomar ou tiver dúvidas sobre o SIN, é só perguntar."
@@ -479,6 +531,7 @@ def _handle_sim_state(user_text: str) -> str | None:
         st.session_state.sim_data = {"sim_type": _restart_type}
         st.session_state.sim_step = "STEP1"
         st.session_state.simulation_mode = True
+        st.session_state.sim_status = "active"
         return (
             "Reiniciando a simulação do zero!\n\n"
             "Antes de começarmos, você vai precisar baixar os arquivos da base "
@@ -493,7 +546,14 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── IDLE: check for simulation intent ─────────────────────────────────────
     if step == "IDLE":
         if _is_simulation_intent(user_text):
+            # Clear any paused state when starting fresh
+            if st.session_state.sim_status == "paused":
+                try:
+                    clear_paused_state(st.session_state["session_id"])
+                except Exception:
+                    pass
             st.session_state.simulation_mode = True
+            st.session_state.sim_status = "active"
             st.session_state.sim_step = "STEP1"
             data["sim_type"] = "STATCOM" if "statcom" in user_text.lower() else "BESS"
             return (
@@ -1245,6 +1305,11 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.simulation_mode = False
             st.session_state.sim_step = "IDLE"
             st.session_state.sim_data = {}
+            st.session_state.sim_status = None
+            try:
+                clear_paused_state(st.session_state["session_id"])
+            except Exception:
+                pass
             return (
                 "Simulação encerrada. Os resultados ficam registrados no histórico acima.\n\n"
                 "Se precisar retomar ou tiver outras dúvidas sobre o SIN, é só perguntar."
@@ -1256,6 +1321,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_data = {}
             st.session_state.sim_step = "STEP1"
             st.session_state.simulation_mode = True
+            st.session_state.sim_status = "active"
             return (
                 "**Qual base de dados deseja utilizar?**\n\n"
                 "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos. "
@@ -1457,25 +1523,81 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-    if st.session_state.simulation_mode:
-        step_label = {
-            "IDLE":  "",
-            "STEP1":  "STEP 1: Base de dados",
-            "STEP2":  "STEP 2: Ano(s)",
-            "STEP3":  "STEP 3: Cenário",
-            "STEP4":  "STEP 4: Carregar SAV",
-            "STEP6":  "STEP 6: Diagrama LST",
-            "STEP7":  "STEP 7: Barra",
-            "STEP8":  "STEP 8: Potência BESS",
-            "STATCOM_STEP_Q":    "STATCOM: Limites reativos",
-            "STATCOM_STEP_CBUS": "STATCOM: Barra controlada",
-            "STEP9":  "STEP 9: Salvar caso",
-            "STEP10": "STEP 10: Rodar fluxo",
-            "STEP11":  "STEP 11: Resultados",
-            "STEP11B": "STEP 11B: Contingências N-1",
-            "STEP12":  "STEP 12: Próximos passos",
-        }.get(st.session_state.sim_step, "")
+    _step_labels = {
+        "IDLE":  "",
+        "STEP1":  "STEP 1: Base de dados",
+        "STEP2":  "STEP 2: Ano(s)",
+        "STEP3":  "STEP 3: Cenário",
+        "STEP4":  "STEP 4: Carregar SAV",
+        "STEP6":  "STEP 6: Diagrama LST",
+        "STEP7":  "STEP 7: Barra",
+        "STEP8":  "STEP 8: Potência BESS",
+        "STATCOM_STEP_Q":    "STATCOM: Limites reativos",
+        "STATCOM_STEP_CBUS": "STATCOM: Barra controlada",
+        "STEP9":  "STEP 9: Salvar caso",
+        "STEP10": "STEP 10: Rodar fluxo",
+        "STEP11":  "STEP 11: Resultados",
+        "STEP11B": "STEP 11B: Contingências N-1",
+        "STEP12":  "STEP 12: Próximos passos",
+    }
+
+    if st.session_state.sim_status == "paused":
+        step_label = _step_labels.get(st.session_state.sim_step, "")
+        st.warning(f"⏸️ Simulação pausada\n{step_label}")
+        col_resume, col_end = st.columns(2)
+        with col_resume:
+            if st.button("▶️ Retomar", use_container_width=True):
+                st.session_state.sim_status = "active"
+                st.session_state.simulation_mode = True
+                try:
+                    clear_paused_state(st.session_state["session_id"])
+                except Exception:
+                    pass
+                last_q = st.session_state.sim_data.get("last_step_question", "")
+                if last_q:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"Simulação retomada.\n\n{last_q}",
+                    })
+                st.rerun()
+        with col_end:
+            if st.button("⏹️ Encerrar", use_container_width=True):
+                st.session_state.simulation_mode = False
+                st.session_state.sim_step = "IDLE"
+                st.session_state.sim_data = {}
+                st.session_state.sim_status = None
+                try:
+                    clear_paused_state(st.session_state["session_id"])
+                except Exception:
+                    pass
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "Simulação encerrada.",
+                })
+                st.rerun()
+    elif st.session_state.sim_status == "active":
+        step_label = _step_labels.get(st.session_state.sim_step, "")
         st.success(f"🔬 Modo: Guia de Simulação\n{step_label}")
+        if st.button("⏸️ Pausar simulação", use_container_width=True):
+            st.session_state.sim_status = "paused"
+            st.session_state.simulation_mode = False
+            try:
+                save_paused_state(
+                    st.session_state["session_id"],
+                    st.session_state.sim_step,
+                    st.session_state.sim_data,
+                )
+            except Exception:
+                pass
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": (
+                    "Simulação pausada. Você pode fazer perguntas livres.\n\n"
+                    "Use o botão **▶️ Retomar** na barra lateral ou digite "
+                    "**retomar** para voltar à simulação."
+                ),
+            })
+            st.rerun()
     else:
         st.info("💬 Modo: Conversa Livre")
 
@@ -1485,10 +1607,15 @@ with st.sidebar:
         st.session_state.simulation_mode = False
         st.session_state.sim_step = "IDLE"
         st.session_state.sim_data = {}
+        st.session_state.sim_status = None
         st.session_state.study = StudyState()
         st.session_state.chain = None
         st.session_state.chain_error = None
         clear_study()
+        try:
+            clear_paused_state(st.session_state["session_id"])
+        except Exception:
+            pass
         st.rerun()
 
     st.divider()
@@ -1496,7 +1623,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v5.2")
+    st.caption("v5.3")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -1547,6 +1674,49 @@ if prompt:
     except Exception:
         pass
 
+    # ── Handle "retomar" text command while paused ─────────────────────────────
+    _resume_kws = ["retomar", "continuar simulação", "continuar simulacao",
+                   "voltar à simulação", "voltar a simulacao", "resume"]
+    if st.session_state.sim_status == "paused" and any(
+        kw in prompt.lower() for kw in _resume_kws
+    ):
+        st.session_state.sim_status = "active"
+        st.session_state.simulation_mode = True
+        try:
+            clear_paused_state(st.session_state["session_id"])
+        except Exception:
+            pass
+        last_q = st.session_state.sim_data.get("last_step_question", "")
+        _resume_msg = "Simulação retomada."
+        if last_q:
+            _resume_msg += f"\n\n{last_q}"
+        with st.chat_message("assistant"):
+            st.markdown(_resume_msg)
+        st.session_state.messages.append({"role": "assistant", "content": _resume_msg})
+        try:
+            log_chat_message(
+                st.session_state["user"]["id"],
+                st.session_state["session_id"],
+                "assistant", _resume_msg,
+                st.session_state.get("sim_step"),
+            )
+        except Exception:
+            pass
+        save_study(st.session_state.study)
+        st.stop()
+
+    # ── Auto-resume: if paused and user gives a simulation-like answer ────────
+    if st.session_state.sim_status == "paused" and not _is_free_question(prompt):
+        # Check if the answer looks like it could advance the sim state machine
+        _test_step = st.session_state.sim_step
+        if _test_step not in ("IDLE", "STEP12") and not _is_simulation_intent(prompt):
+            st.session_state.sim_status = "active"
+            st.session_state.simulation_mode = True
+            try:
+                clear_paused_state(st.session_state["session_id"])
+            except Exception:
+                pass
+
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
     # Track last question for context restoration after free LLM answers
@@ -1571,14 +1741,29 @@ if prompt:
             study_context = st.session_state.study.summary()
             full_prompt = prompt
 
-            # Inject simulation context if mid-simulation
+            # Inject compact simulation context nudge if mid-simulation
             active_step = st.session_state.sim_step
             sim_context_note = ""
-            if active_step not in ("IDLE", "STEP12"):
-                last_q = st.session_state.sim_data.get("last_step_question", "")
+            if active_step not in ("IDLE", "STEP12") and st.session_state.sim_status == "active":
+                _nudge_labels = {
+                    "STEP1": "base de dados",
+                    "STEP2": "ano(s)",
+                    "STEP3": "cenário de carga",
+                    "STEP4": "convergência do caso base",
+                    "STEP6": "diagrama LST",
+                    "STEP7": "barra de inserção",
+                    "STEP8": "potência da BESS",
+                    "STATCOM_STEP_Q": "limites reativos",
+                    "STATCOM_STEP_CBUS": "barra controlada",
+                    "STEP9": "confirmação de salvamento",
+                    "STEP10": "resultado do fluxo",
+                    "STEP11": "análise de resultados",
+                    "STEP11B": "contingências N-1",
+                }
+                nudge = _nudge_labels.get(active_step, "próximo passo")
                 sim_context_note = (
-                    f"\n\n---\n↩️ **Voltando à simulação** — {last_q}"
-                    if last_q else ""
+                    f"\n\n---\n↩️ Quando terminar, responda sobre **{nudge}** "
+                    "para continuar a simulação."
                 )
 
             with st.spinner("Consultando base de conhecimento..."):

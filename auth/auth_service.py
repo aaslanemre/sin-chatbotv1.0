@@ -1,3 +1,4 @@
+import json
 import os
 import bcrypt
 from datetime import datetime
@@ -362,6 +363,63 @@ def unflag_session(session_id: str):
     try:
         cur.execute(
             "UPDATE sessions SET flagged = false, flag_note = NULL WHERE id = %s::uuid",
+            (session_id,),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_paused_state(session_id: str, sim_step: str, sim_data: dict):
+    """Persist simulation state as JSONB so user can resume later."""
+    payload = {"sim_step": sim_step, "sim_data": sim_data}
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE sessions SET paused_state = %s::jsonb WHERE id = %s::uuid",
+            (json.dumps(payload), session_id),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_paused_state(user_id: str) -> dict | None:
+    """Return the most recent paused simulation for this user, or None."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """SELECT id, paused_state
+               FROM sessions
+               WHERE user_id = %s::uuid AND paused_state IS NOT NULL
+               ORDER BY last_message_at DESC
+               LIMIT 1""",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if row and row["paused_state"]:
+            ps = row["paused_state"]
+            if isinstance(ps, str):
+                ps = json.loads(ps)
+            ps["session_id"] = str(row["id"])
+            return ps
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clear_paused_state(session_id: str):
+    """Remove paused state after resuming or discarding."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE sessions SET paused_state = NULL WHERE id = %s::uuid",
             (session_id,),
         )
         conn.commit()

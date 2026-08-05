@@ -87,8 +87,16 @@ def init_db():
             sim_type TEXT,
             final_sim_step TEXT,
             flagged BOOLEAN DEFAULT false,
-            flag_note TEXT
+            flag_note TEXT,
+            paused_state JSONB
         );
+    """)
+    # Add paused_state column if upgrading from v5.2
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE sessions ADD COLUMN paused_state JSONB;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
     """)
     conn.commit()
     cur.close()
