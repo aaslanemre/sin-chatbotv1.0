@@ -6,9 +6,9 @@ Requires=docker.service
 [Service]
 Type=simple
 User=siemens
-WorkingDirectory=/home/siemens/sin-chatbot
+WorkingDirectory=/home/siemens/sin-chatbotv1.0
 Environment="PATH=/home/siemens/.local/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/usr/bin/python3 -m streamlit run app.py \
+ExecStart=/usr/bin/python3.11 -m streamlit run app.py \
   --server.port 8501 \
   --server.address 0.0.0.0 \
   --server.headless true \
