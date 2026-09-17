@@ -406,7 +406,7 @@ After user provides bus:
 
 "Para inserir a BESS nessa barra, recomenda-se criar uma nova
 barra que representará a bateria e conectá-la à barra desejada
-por uma linha de transmissão com reatância de 0.00001 pu
+por uma linha de transmissão com reatância de 0.00001% (praticamente zero)
 (resistência e susceptância zeradas).
 
 Qual o modo de operação da BESS?
