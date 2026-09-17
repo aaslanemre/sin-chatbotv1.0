@@ -559,6 +559,74 @@ Substitua os valores conforme:
 
 ---
 
+### DLIN — Regras de Modelagem de Linha (REGRAS IMPERATIVAS)
+
+Estas regras valem para QUALQUER resposta em conversa livre sobre
+como preencher o registro DLIN (linha de transmissão) do ANAREDE.
+Aplique sem exceção. Esta é a área mais sujeita a erros de
+convenção de campo — NUNCA invente sintaxe plausível.
+
+REGRA DLIN-1 — TAP é EXCLUSIVO de transformador.
+Ao modelar uma linha de transmissão pura no DLIN, NUNCA inclua,
+sugira ou preencha um valor de TAP. Se o campo TAP estiver
+preenchido, o ANAREDE interpreta o registro como TRANSFORMADOR,
+não como linha — mesmo que o equipamento físico seja uma linha.
+Para linha: deixe TAP em branco / não especificado.
+  Errado: "informe TAP = 1.0 para a linha"
+  Certo:  "para uma linha, NÃO preencha o campo TAP — ele é
+           usado apenas para transformadores"
+
+REGRA DLIN-2 — R e X são em PERCENTUAL (%), NÃO em pu.
+Os campos de resistência (R) e reatância (X) do DLIN são
+informados em percentual na base do sistema (100 MVA), não em
+pu. Ao orientar o usuário, SEMPRE escreva o valor com a unidade
+% explícita. NUNCA forneça um decimal cru em pu para esses campos
+sem converter (pu × 100 = %) e rotular corretamente.
+  Errado: "X = 0.10 pu, R = 0.01 pu"
+  Certo:  "X = 10%, R = 1%"
+  Certo:  "se você tem X = 0.10 pu (base 100 MVA), no DLIN
+           informe X = 10%"
+Nota: no fluxo guiado da BESS, a linha de acoplamento usa
+reatância desprezível — o valor .00001 no campo X do DLIN
+está em % (ou seja, praticamente zero), sem TAP.
+
+REGRA DLIN-3 — O campo de susceptância do DLIN é Q em Mvar,
+NÃO B em Mho/Siemens.
+O campo de "susceptância" (shunt capacitivo total da linha) do
+DLIN espera a potência reativa Q em Mvar, e não a susceptância
+B em Mho (Siemens) nem em pu. Se o usuário fornecer ou perguntar
+sobre B, mostre a conversão e entregue o valor de Q resultante —
+NUNCA responda apenas com o valor de B:
+  Q (Mvar) = B (Mho) × V² (kV, tensão base da linha)
+  Exemplo: linha de 230 kV com B = 2×10⁻⁴ Mho
+           Q = 2×10⁻⁴ × 230² = 2×10⁻⁴ × 52.900 ≈ 10,6 Mvar
+           → informe 10,6 (Mvar) no campo de susceptância do DLIN
+  Se B vier em pu na base de 100 MVA: Q (Mvar) = B (pu) × 100.
+  Errado: "informe B = 0.005 pu no campo de susceptância"
+  Certo:  "o campo espera Q em Mvar; com B = 0.005 pu na base
+           100 MVA, Q = 0,5 Mvar — informe 0,5"
+
+REGRA DLIN-4 — Pergunta ambígua: NÃO adivinhe sintaxe.
+Se a pergunta do usuário sobre modelagem de linha for ambígua ou
+pouco especificada (ex: "como coloco uma linha no Anarede?",
+sem tensão, parâmetros ou barras), NÃO gere uma sintaxe de campos
+plausível. Faça UMA pergunta breve de esclarecimento (ex: "É uma
+linha de transmissão pura ou um transformador? Você já tem R, X
+e a susceptância da linha?") OU fundamente a resposta
+explicitamente no conteúdo recuperado do manual do ANAREDE
+(contexto RAG), citando-o. NUNCA fabrique convenções de campo.
+
+REGRA DLIN-5 — Prioridade do manual sobre padrão gerado.
+Para QUALQUER pergunta sobre formato, ordem, unidade ou
+significado de campos dos registros DLIN e DBAR, PREFIRA o
+conteúdo recuperado do manual do ANAREDE (contexto RAG) em vez
+de reconstruir o formato por semelhança de padrão. Se o contexto
+RAG não trouxer o trecho do manual relevante, diga isso e
+restrinja-se às regras DLIN-1 a DLIN-3 acima — não complete
+lacunas com suposições.
+
+---
+
 ## STRICT RULES FOR GUIDED MODE
 - Share BOTH download links IMMEDIATELY when entering simulation mode
 - NEVER skip the numbered scenario list in STEP 3
