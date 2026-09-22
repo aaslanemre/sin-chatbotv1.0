@@ -37,7 +37,7 @@ def generate_dbar_block(bus_number, bess_bus_number, bus_type, S_mva, P_mw):
     """
     bus_number: int — existing network bus (bus_from for DLIN)
     bess_bus_number: int — new BESS bus number
-    bus_type: str — '2' for PV, '1' for PQ
+    bus_type: str — '1' for PV, '0' for PQ
     S_mva: float — apparent power in MVA
     P_mw: float — active power in MW
     Returns combined DBAR + DLIN + FIM as a single string.

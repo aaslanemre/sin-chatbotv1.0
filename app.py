@@ -350,7 +350,7 @@ def _bess_pwf_lines(data: dict) -> str:
     bus_from   = data.get("bess_bus", "")         # existing bus (bus_from)
     bus_to     = data.get("bess_bus_number", "")  # new BESS bus (bus_to)
     mva        = data.get("bess_mva", "100")
-    mode_type  = "2" if data.get("bess_mode") == "PV" else "1"
+    mode_type  = "1" if data.get("bess_mode") == "PV" else "0"
     try:
         s = float(mva)
     except Exception:
