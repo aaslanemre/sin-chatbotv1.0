@@ -80,6 +80,7 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
     st.divider()
+    st.caption("v6.1")
 
 # ── Render admin panel ───────────────────────────────────────────────────────
 from admin.panel import render_admin_panel

@@ -16,7 +16,7 @@ from auth.auth_service import (
 )
 
 st.set_page_config(
-    page_title="Assistente SIN v5.3",
+    page_title="Assistente SIN v6.1",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -470,6 +470,99 @@ def _is_free_question(text: str) -> bool:
         "você pode explicar", "pode me explicar", "pode me dizer",
     ]
     return any(tl.startswith(s) for s in _STARTERS)
+
+
+def _current_step_question() -> str:
+    """Return the question for the CURRENT simulation step.
+
+    Derived live from ``sim_step`` (and the relevant ``sim_data`` sub-state)
+    every time it is called, so pause/resume nudges always reflect where the
+    simulation actually is — never a value cached when pause was first entered.
+    """
+    step = st.session_state.sim_step
+    data = st.session_state.sim_data
+    db = data.get("db", "ONS")
+    sim_type = data.get("sim_type", "BESS")
+    device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
+
+    if step == "STEP1":
+        return (
+            "**Qual base de dados deseja utilizar?**\n\n"
+            "1. **EPE (PDE)**\n\n"
+            "2. **ONS (PAR/PEL)**"
+        )
+    if step == "STEP2":
+        return (
+            "**Qual ano (ou anos) deseja estudar?** "
+            "(ex: **2028** ou **2027, 2028, 2029**)"
+        )
+    if step == "STEP3":
+        return _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+    if step == "STEP4":
+        return "O que aparece no canto superior direito do ANAREDE após carregar o caso?"
+    if step == "STEP6":
+        return (
+            "Para visualizar a região de estudo: **Opção A** — carregar um arquivo "
+            "LST (**Diagrama > Carregar**); **Opção B** — desenhar com o ícone do "
+            "**lápis**. Qual opção você vai utilizar?"
+        )
+    if step == "STEP7":
+        if sim_type == "BESS" and "bess_bus" in data:
+            return (
+                "**Qual o modo de operação da BESS?**\n\n"
+                "1. **Controle de tensão (barra PV — tipo 2)**\n\n"
+                "2. **Despacho fixo (barra PQ — tipo 1)**"
+            )
+        return f"Qual é a barra onde deseja inserir o {device_label}?"
+    if step == "STEP8":
+        if "bess_mva" not in data:
+            return "**Qual a potência nominal da BESS em MVA?**"
+        if "bess_p_mw" not in data:
+            return "**Qual a potência ativa em MW?**"
+        return (
+            "Qual número de barra está disponível no seu caso para a nova barra "
+            "da BESS? (escolha um número que não exista no caso atual)"
+        )
+    if step == "STATCOM_STEP_Q":
+        return (
+            "**Qual a capacidade reativa do STATCOM?** Informe Qmin e Qmax em "
+            "Mvar (ex: `Qmin -100 Mvar, Qmax 100 Mvar`)."
+        )
+    if step == "STATCOM_STEP_CBUS":
+        return (
+            "**O STATCOM vai controlar a tensão da própria barra ou de uma barra "
+            "remota?**\n\n1. **Barra local (padrão)**\n\n2. **Barra remota** "
+            "(informe o número da barra a controlar)"
+        )
+    if step == "STEP9":
+        return "Confirme quando o caso estiver salvo no ANAREDE (responda **salvo** ou **pronto**)."
+    if step == "STEP10":
+        return "O que aparece no canto superior direito do ANAREDE após rodar o fluxo?"
+    if step == "STEP11":
+        return "O que você está observando no diagrama?"
+    if step == "STEP11B":
+        stage = data.get("contingency_stage")
+        if stage == "guide":
+            return (
+                "Informe as linhas ou geradores para a análise N-1 "
+                "(ex: `linha 1001-1002 circuito 1` ou `gerador barra 1005`)."
+            )
+        if stage == "done":
+            return (
+                "**Executar agora** (Ctrl+E), **adicionar mais** contingências "
+                "ou **encerrar contingências**?"
+            )
+        if stage == "awaiting_results":
+            return "O que aparece no relatório de contingências e no diagrama?"
+        return "Deseja realizar análise de contingências N-1? Responda **Sim** ou **Não**."
+    if step == "STEP12":
+        return (
+            "Deseja continuar com outro cenário ou patamar de carga?\n\n"
+            "- Responda com o **nome ou número do cenário** para ir direto\n"
+            "- Informe um **novo ano** (2026–2040) para trocar o horizonte\n"
+            "- Digite **encerrar** para finalizar a sessão de simulação"
+        )
+    return ""
 
 
 def _handle_sim_state(user_text: str) -> str | None:
@@ -1298,10 +1391,13 @@ def _handle_sim_state(user_text: str) -> str | None:
     if step == "STEP12":
         t = user_text.lower()
         db = data.get("db", "ONS")
-        max_scenario = 6 if db in ("ONS", "PARPEL") else 8
 
-        # Encerrar / não continuar
-        if any(kw in t for kw in ["não", "nao", "encerrar", "finalizar", "fim", "terminar", "acabou"]):
+        # ── Explicit end signal only — matched as whole words so unrelated
+        #    input never ends the session abruptly (e.g. "determinar" no longer
+        #    trips "terminar", and a bare "não" is treated as unrecognized). ──
+        _END_TOKENS = {"encerrar", "encerra", "finalizar", "finaliza",
+                       "terminar", "fim", "sair"}
+        if _END_TOKENS & set(re.findall(r"\w+", t)):
             st.session_state.simulation_mode = False
             st.session_state.sim_step = "IDLE"
             st.session_state.sim_data = {}
@@ -1412,22 +1508,15 @@ def _handle_sim_state(user_text: str) -> str | None:
             scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
             return "Qual cenário deseja estudar agora?\n\n" + scenarios
 
-        # BUG 3 — Standalone number outside scenario range → disambiguation
-        lone_num = re.search(r"^\s*(\d+)\s*$", user_text.strip())
-        if lone_num:
-            num_val = int(lone_num.group(1))
-            if num_val > max_scenario:
-                return (
-                    f"Não reconheci esse valor. Deseja selecionar um cenário (1–{max_scenario}), "
-                    "informar um novo ano, ou encerrar?"
-                )
-
-        # Anything else: re-ask the continuation question (never fall to RAG)
+        # Anything unrecognized (including out-of-range numbers) always shows
+        # the same clarification — never silently ignored, never routed to RAG,
+        # and never ends the session without an explicit end signal.
         return (
-            "Deseja continuar com outro cenário ou patamar de carga?\n\n"
+            "Não entendi sua resposta. Deseja continuar com outro cenário ou "
+            "patamar de carga?\n\n"
             "- Responda com o **nome ou número do cenário** para ir direto\n"
             "- Informe um **novo ano** (2026–2040) para trocar o horizonte\n"
-            "- **Encerrar** para finalizar a sessão de simulação"
+            "- Digite **encerrar** para finalizar a sessão de simulação"
         )
 
     # ── STATCOM STEP Q: collect Q limits ─────────────────────────────────────
@@ -1553,7 +1642,7 @@ with st.sidebar:
                     clear_paused_state(st.session_state["session_id"])
                 except Exception:
                     pass
-                last_q = st.session_state.sim_data.get("last_step_question", "")
+                last_q = _current_step_question()
                 if last_q:
                     st.session_state.messages.append({
                         "role": "assistant",
@@ -1623,7 +1712,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v5.3")
+    st.caption("v6.1")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -1686,7 +1775,7 @@ if prompt:
             clear_paused_state(st.session_state["session_id"])
         except Exception:
             pass
-        last_q = st.session_state.sim_data.get("last_step_question", "")
+        last_q = _current_step_question()
         _resume_msg = "Simulação retomada."
         if last_q:
             _resume_msg += f"\n\n{last_q}"
@@ -1719,9 +1808,6 @@ if prompt:
 
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
-    # Track last question for context restoration after free LLM answers
-    if sim_response is not None:
-        st.session_state.sim_data["last_step_question"] = sim_response
 
     with st.chat_message("assistant"):
         if sim_response is not None:
