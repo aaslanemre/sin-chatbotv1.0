@@ -445,20 +445,20 @@ escolhida para o estudo."
 ---
 
 ### STEP 9 — Save modified case
-"Antes de rodar o fluxo de potência, salve o caso com a BESS
-incluída em um novo caso SAV para não perder as alterações.
+"Antes de rodar o fluxo de potência, salve o caso COM a BESS/STATCOM
+incluída — mesmo que ele ainda esteja mostrando 'Não Convergido'
+(amarelo) no canto superior direito. Isso é esperado neste
+momento: você está salvando a modificação, não um resultado
+convergido.
 
 No ANAREDE:
 1. Vá em Histórico > Operações
-2. Na parte inferior, no campo 'Caso', coloque um número diferente
-   dos casos já existentes
+2. No campo 'Caso', coloque um número diferente dos casos já
+   existentes
 3. Clique em Salvar
 
-Nota: ao adicionar a BESS, o quadrado no canto superior direito
-mudará de verde para amarelo ('Não Convergido'). Isso é normal —
-salve mesmo assim. Você salvará novamente após convergir.
-
-Confirme quando o caso estiver salvo."
+Confirme quando o caso estiver salvo — depois vamos rodar o
+fluxo de potência."
 
 ---
 
