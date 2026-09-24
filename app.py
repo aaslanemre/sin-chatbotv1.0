@@ -222,6 +222,80 @@ def _is_simulation_intent(text: str) -> bool:
     return any(trigger in t for trigger in _SIMULATION_INTENT_TRIGGERS)
 
 
+# ── LT implicit-intent detection ──────────────────────────────────────────────
+
+_LT_PARAM_SIGS = [
+    r"\bR\s*[=:]\s*\d",
+    r"\bX\s*[=:]\s*\d",
+    r"\bB\s*[=:]\s*\d",
+    r"\d[.,]\d+\s*ohm",
+    r"\d[.,]\d+\s*(?:μS|uS|µS)",
+    r"\b\d+\s*km\b",
+    r"\b\d{2,3}\s*kV\b",
+]
+
+_LT_CONTEXT_SIGS = [
+    r"\banarede\b",
+    r"\bdlin\b",
+    r"\bdbar\b",
+    r"\blinha\s+de\s+transmiss",
+    r"\bLT\b",
+    r"\bintegr[ao]",
+    r"\bmodel[ao]",
+    r"\binserir?\b",
+    r"\bsimul[ao]",
+]
+
+
+def _is_lt_data_message(text: str) -> bool:
+    """Return True if the message looks like raw transmission-line parameter data."""
+    param_hits = sum(1 for p in _LT_PARAM_SIGS if re.search(p, text, re.IGNORECASE))
+    if param_hits < 2:
+        return False
+    context_hits = sum(1 for p in _LT_CONTEXT_SIGS if re.search(p, text, re.IGNORECASE))
+    # ≥2 param signals + ≥1 context keyword is sufficient.
+    # Require ≥3 param signals when no context keyword, to avoid false positives
+    # on generic questions that merely mention kV and km.
+    return context_hits >= 1 or param_hits >= 3
+
+
+def _parse_lt_params(text: str) -> dict:
+    """Extract LT physical parameters from a message; returns whatever was found."""
+    params: dict = {}
+    m = re.search(r"\b(\d{2,3})\s*kV\b", text, re.IGNORECASE)
+    if m:
+        params["voltage_kv"] = float(m.group(1))
+    m = re.search(r"\b(\d+(?:[.,]\d+)?)\s*km\b", text, re.IGNORECASE)
+    if m:
+        params["length_km"] = float(m.group(1).replace(",", "."))
+    m = re.search(r"\bR\s*[=:]\s*(\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if m:
+        params["R_ohm_km"] = float(m.group(1).replace(",", "."))
+    m = re.search(r"\bX\s*[=:]\s*(\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if m:
+        params["X_ohm_km"] = float(m.group(1).replace(",", "."))
+    m = re.search(r"\bB\s*[=:]\s*(\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if m:
+        params["B_us_km"] = float(m.group(1).replace(",", "."))
+    return params
+
+
+def _format_lt_params(params: dict) -> str:
+    """Format detected LT parameters as a compact readable string."""
+    parts = []
+    if "voltage_kv" in params:
+        parts.append(f"{int(params['voltage_kv'])} kV")
+    if "length_km" in params:
+        parts.append(f"{params['length_km']} km")
+    if "R_ohm_km" in params:
+        parts.append(f"R = {params['R_ohm_km']} Ω/km")
+    if "X_ohm_km" in params:
+        parts.append(f"X = {params['X_ohm_km']} Ω/km")
+    if "B_us_km" in params:
+        parts.append(f"B = {params['B_us_km']} μS/km")
+    return ", ".join(parts)
+
+
 def _parse_years(text: str) -> list[int]:
     """Return list of years found in text."""
     return [int(y) for y in re.findall(r"\b(20\d\d)\b", text)]
@@ -326,7 +400,12 @@ def _parse_bess_mode(text: str):
 
 
 def _parse_mva(text: str):
-    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:mva|mw|MW|MVA)?", text)
+    # Require an explicit MVA unit to avoid grabbing unrelated numbers (kV, km, etc.)
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:mva|MW|MVA)\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).replace(",", ".")
+    # Bare number only when the entire message is a single numeric token
+    m = re.search(r"^\s*(\d+(?:[.,]\d+)?)\s*$", text.strip())
     if m:
         return m.group(1).replace(",", ".")
     return None
@@ -415,7 +494,7 @@ def extract_sim_context(message: str) -> dict:
     if bus_match:
         bus_number = bus_match.group(1)
     else:
-        bus_match = re.search(r"\b(\d{4,5})\b", message)
+        bus_match = re.search(r"(?<![.,\d])(\d{4,5})\b", message)
         bus_number = bus_match.group(1) if bus_match else None
 
     # BESS mode
@@ -485,6 +564,12 @@ def _current_step_question() -> str:
     sim_type = data.get("sim_type", "BESS")
     device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
 
+    if step == "IDLE_LT_CONFIRM":
+        return (
+            "Você quer que eu te guie pelo processo de inserção no ANAREDE?\n\n"
+            "1. **Sim** — iniciar simulação guiada\n\n"
+            "2. **Não** — só quero uma resposta técnica"
+        )
     if step == "STEP1":
         return (
             "**Qual base de dados deseja utilizar?**\n\n"
@@ -595,7 +680,9 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # If mid-simulation and user asked a free question, let LLM handle it
     # (simulation state is preserved; ↩️ reminder appended by the LLM branch)
-    if step not in ("IDLE", "STEP12") and _is_free_question(user_text):
+    # IDLE_LT_CONFIRM is excluded: it handles free questions internally (abandons
+    # the LT confirmation and routes cleanly to the LLM).
+    if step not in ("IDLE", "IDLE_LT_CONFIRM", "STEP12") and _is_free_question(user_text):
         return None
 
     # ── Global: encerrar / restart checks (before any step logic) ─────────────
@@ -671,7 +758,74 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Para estudos de inserção de tecnologias como BESS no SIN, o "
                 "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
             )
+        if _is_lt_data_message(user_text):
+            pending_lt = _parse_lt_params(user_text)
+            data["pending_lt"] = pending_lt
+            data["pending_question"] = user_text
+            st.session_state.sim_step = "IDLE_LT_CONFIRM"
+            lt_summary = _format_lt_params(pending_lt)
+            detected_str = f": **{lt_summary}**" if lt_summary else ""
+            return (
+                f"Identifiquei parâmetros de linha de transmissão na sua mensagem{detected_str}.\n\n"
+                "Você quer que eu te guie pelo processo de inserção no ANAREDE?\n\n"
+                "1. **Sim** — iniciar simulação guiada\n\n"
+                "2. **Não** — só quero uma resposta técnica"
+            )
         return None  # Let LLM answer
+
+    # ── IDLE_LT_CONFIRM: user is confirming whether to start guided flow ───────
+    if step == "IDLE_LT_CONFIRM":
+        tl = user_text.lower().strip()
+
+        # If the user asks an unrelated free question, abandon the confirmation
+        if _is_free_question(user_text):
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            return None
+
+        if tl in ("1", "sim", "s", "quero", "iniciar") or any(
+            w in tl for w in ["sim", "quero", "iniciar", "pode", "vamos"]
+        ):
+            pending_lt = data.get("pending_lt", {})
+            lt_summary = _format_lt_params(pending_lt)
+            st.session_state.simulation_mode = True
+            st.session_state.sim_status = "active"
+            st.session_state.sim_step = "STEP1"
+            data["sim_type"] = "BESS"
+            # Keep pending_lt in sim_data so it is not discarded
+            return (
+                (f"Ótimo! Registrei os parâmetros da sua LT: **{lt_summary}**.\n\n" if lt_summary else "Ótimo!\n\n")
+                + "⚠️ **Nota:** O fluxo atual guia a inserção de BESS/STATCOM no ANAREDE. "
+                "Os parâmetros físicos da LT (R/X em Ω/km, B em μS/km) estão armazenados "
+                "mas a conversão automática para o formato DLIN do ANAREDE "
+                "(R/X em %, susceptância em Mvar) ainda não está implementada neste fluxo — "
+                "não os descartarei.\n\n"
+                "---\n\n"
+                "Vamos começar pelo caso base. Você vai precisar baixar os arquivos da base "
+                "de dados:\n\n"
+                "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos.\n\n"
+                "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos.\n\n"
+                "**Qual base de dados deseja utilizar?**\n\n"
+                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos.\n\n"
+                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos."
+            )
+
+        if tl in ("2", "não", "nao", "n", "não") or any(
+            w in tl for w in ["não", "nao", "apenas", "só", "so", "tecnica", "técnica"]
+        ):
+            original_q = data.get("pending_question")
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            if original_q:
+                # Store for main handler to feed to LLM instead of the "não" message
+                st.session_state["_lt_confirm_question"] = original_q
+            return None  # LLM will answer the original question
+
+        return (
+            "Não entendi a resposta. Você quer iniciar a simulação guiada?\n\n"
+            "1. **Sim** — iniciar simulação guiada\n\n"
+            "2. **Não** — só quero uma resposta técnica"
+        )
 
     # ── STEP 1: waiting for EPE/ONS choice ────────────────────────────────────
     if step == "STEP1":
@@ -892,10 +1046,10 @@ def _handle_sim_state(user_text: str) -> str | None:
         sim_type = data.get("sim_type", "BESS")
         # ── STATCOM path: just ask for bus, then Q limits ─────────────────────
         if sim_type == "STATCOM":
-            bus_match = re.search(r"\b(\d{4,5})\b", user_text)
+            bus_match = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
             if bus_match:
                 data["statcom_bus"] = bus_match.group(1)
-            elif len(user_text.strip()) >= 2:
+            elif 2 <= len(user_text.strip()) <= 50:
                 data["statcom_bus"] = user_text.strip()
             else:
                 return "Qual é a barra onde deseja inserir o STATCOM?"
@@ -908,18 +1062,19 @@ def _handle_sim_state(user_text: str) -> str | None:
             )
         # ── BESS path ─────────────────────────────────────────────────────────
         if "bess_bus" not in data:
-            # Parse bus from user message — accept any number or name
-            bus_match = re.search(r"\b(\d{4,5})\b", user_text)
+            # Parse bus from user message — accept any number or short name
+            bus_match = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
             if bus_match:
                 data["bess_bus"] = bus_match.group(1)
             else:
-                # Accept any non-trivial text as bus name
+                # Accept short text as a subestação name, but reject long
+                # parameter dumps that the regex couldn't parse into a bus number
                 stripped = user_text.strip()
-                if len(stripped) >= 2:
+                if 2 <= len(stripped) <= 50:
                     data["bess_bus"] = stripped
                 else:
                     return (
-                        "Não identifiquei a barra. Por favor, informe o número "
+                        "Não identifiquei a barra. Por favor, informe apenas o número "
                         "ou nome da barra onde deseja inserir a BESS."
                     )
             bus = data["bess_bus"]
@@ -1053,7 +1208,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             )
         else:
             # Sub-step 8c: both S_mva and P_mw confirmed — collect new BESS bus number
-            bus_num_match = re.search(r"\b(\d{4,5})\b", user_text)
+            bus_num_match = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
             if not bus_num_match:
                 return (
                     "Não identifiquei o número da barra. "
@@ -1549,7 +1704,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             controlled_bus = None
             cb_label = f"barra local ({bus_str})"
         else:
-            m = re.search(r"\b(\d{4,5})\b", user_text)
+            m = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
             if m:
                 controlled_bus = int(m.group(1))
                 cb_label = f"barra remota **{controlled_bus}**"
@@ -1613,7 +1768,8 @@ with st.sidebar:
     st.divider()
 
     _step_labels = {
-        "IDLE":  "",
+        "IDLE":             "",
+        "IDLE_LT_CONFIRM":  "Confirmação: dados de LT detectados",
         "STEP1":  "STEP 1: Base de dados",
         "STEP2":  "STEP 2: Ano(s)",
         "STEP3":  "STEP 3: Cenário",
@@ -1826,6 +1982,11 @@ if prompt:
             # MODE 1: free technical Q&A via LLM
             study_context = st.session_state.study.summary()
             full_prompt = prompt
+            # If user just declined IDLE_LT_CONFIRM, answer their original question
+            _lt_q = st.session_state.get("_lt_confirm_question")
+            if _lt_q:
+                full_prompt = _lt_q
+                del st.session_state["_lt_confirm_question"]
 
             # Inject compact simulation context nudge if mid-simulation
             active_step = st.session_state.sim_step
