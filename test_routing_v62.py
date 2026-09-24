@@ -276,7 +276,7 @@ check(
     _ss["sim_step"] == "IDLE_LT_CONFIRM",
 )
 
-# ── IDLE_LT_CONFIRM: user says "sim" → enters STEP1, keeps pending_lt ─────────
+# ── IDLE_LT_CONFIRM: user says "sim" → enters IDLE_LT_NET_CHOICE, keeps pending_lt
 print("\n--- IDLE_LT_CONFIRM 'sim' path ---\n")
 
 reset_idle()
@@ -288,8 +288,8 @@ print(f"  pending_lt preserved → {bool(_ss['sim_data'].get('pending_lt'))}")
 print(f"  response excerpt     → {repr(resp_confirm_yes[:120]) if resp_confirm_yes else 'None'}")
 
 check(
-    "IDLE_LT_CONFIRM 'sim': sim_step advances to STEP1",
-    _ss["sim_step"] == "STEP1",
+    "IDLE_LT_CONFIRM 'sim': sim_step advances to IDLE_LT_NET_CHOICE",
+    _ss["sim_step"] == "IDLE_LT_NET_CHOICE",
 )
 check(
     "IDLE_LT_CONFIRM 'sim': sim_status = active",
@@ -300,8 +300,22 @@ check(
     bool(_ss["sim_data"].get("pending_lt")),
 )
 check(
-    "IDLE_LT_CONFIRM 'sim': response contains DLIN flag note",
-    resp_confirm_yes is not None and "DLIN" in resp_confirm_yes,
+    "IDLE_LT_CONFIRM 'sim': response offers rede-nova vs. caso-existente choice",
+    resp_confirm_yes is not None
+    and "rede nova" in resp_confirm_yes.lower()
+    and "existente" in resp_confirm_yes.lower(),
+)
+
+# ── IDLE_LT_NET_CHOICE: user selects option 2 → advances to STEP1 (as before) ──
+print("\n--- IDLE_LT_NET_CHOICE option 2 → STEP1 ---\n")
+
+resp_net_choice_2 = _handle_sim_state("2")      # insert into existing case
+print(f"  sim_step after '2'   → {_ss['sim_step']}")
+print(f"  pending_lt preserved → {bool(_ss['sim_data'].get('pending_lt'))}")
+
+check(
+    "IDLE_LT_NET_CHOICE '2': sim_step advances to STEP1",
+    _ss["sim_step"] == "STEP1",
 )
 
 # ── IDLE_LT_CONFIRM: user says "não" → LLM gets original question ─────────────
