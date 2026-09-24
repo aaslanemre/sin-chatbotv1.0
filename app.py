@@ -203,6 +203,25 @@ _PDE_SCENARIOS = (
     "8. Mínima Líquida Diurna Coincidente SIN Seco (12h–14h, agosto)"
 )
 
+# ── STEP 1 database-selection question ────────────────────────────────────────
+# Defined ONCE and reused in every place that renders the STEP1 prompt so the
+# option list (including option 3 — build your own network) cannot drift.
+_STEP1_DB_QUESTION = (
+    "**Qual base de dados deseja utilizar?**\n\n"
+    "1. **EPE (PDE)** — planejamento de expansão de longo prazo (~10 anos). "
+    "Modelos com maior incerteza sobre o futuro.\n\n"
+    "2. **ONS (PAR/PEL)** — planejamento operacional de médio prazo (~5 anos). "
+    "Modelos mais detalhados e confiáveis para decisões operativas.\n\n"
+    "3. **Minha própria rede** (montar do zero) — defina barras e linhas "
+    "manualmente, sem precisar baixar bases externas."
+)
+
+# Recommendation appended after the database question in the full intro messages.
+_STEP1_DB_RECOMMENDATION = (
+    "Para estudos de inserção de tecnologias como BESS no SIN, o "
+    "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
+)
+
 _PARPEL_SCENARIO_NAMES = {
     "1": "Verão Máxima Diurna",    "verão máxima diurna": "Verão Máxima Diurna",
     "2": "Verão Máxima Noturna",   "verão máxima noturna": "Verão Máxima Noturna",
@@ -308,6 +327,127 @@ def _parse_four_floats(text: str):
     # Bare sequence of numbers
     nums = [float(x.replace(",", ".")) for x in re.findall(r'[-+]?\d*[.,]?\d+', text)]
     return nums
+
+
+def _looks_like_line_def(text: str) -> bool:
+    """Heuristic: does this message look like a line/branch definition (not a bus)?
+
+    Matches things like ``1-2, circuito 1, ...``, ``1002 - 1003``, or
+    ``de 1 para 2``. Used to avoid swallowing a line definition as a bus field.
+    """
+    t = text.strip().lower()
+    if re.search(r'\b\d{1,5}\s*[-–]\s*\d{1,5}\b', text):
+        return True
+    if "circuito" in t:
+        return True
+    if re.search(r'\bde\s+\d{1,5}\s+para\s+\d{1,5}\b', t):
+        return True
+    return False
+
+
+def _parse_compact_bus(text: str):
+    """Parse a full compact bus line: ``number, name, kV, type[, values]``.
+
+    Returns ``(bus_dict, complete, resume_field)``:
+      - ``bus_dict`` is ``None`` when the text does not look like a bus record
+        (fewer than 4 comma-separated fields, or number/name/kV/type unparsable).
+      - ``complete`` is True when every value required for the bus type is present
+        so the bus can be registered immediately.
+      - ``resume_field`` names the field-by-field sub-question to continue from
+        when the record is only partial (``None`` when complete).
+
+    Type-dependent value fields:
+      - Referência (tipo 2): optional ``V=`` setpoint (defaults to 1.0 pu).
+      - PV (tipo 1): active generation in MW (required) and optional ``V=`` setpoint.
+      - PQ (tipo 0): active load in MW and reactive load in Mvar (both required).
+    """
+    parts = [p.strip() for p in text.split(",") if p.strip() != ""]
+    if len(parts) < 4:
+        return None, False, None
+
+    m = re.match(r'^\s*(\d{1,5})\s*$', parts[0])
+    if not m:
+        return None, False, None
+    number = int(m.group(1))
+    if not (1 <= number <= 99999):
+        return None, False, None
+
+    name = re.sub(r'\s+', '_', parts[1].strip())[:12]
+    if not name:
+        return None, False, None
+
+    kv_m = re.search(r'[-+]?\d*[.,]?\d+', parts[2])
+    if not kv_m:
+        return None, False, None
+    kv = float(kv_m.group(0).replace(",", "."))
+    if kv <= 0:
+        return None, False, None
+
+    tipo = _parse_bus_tipo(parts[3])
+    if tipo is None:
+        return None, False, None
+
+    bus = {
+        "number": number, "name": name, "kv": kv, "tipo": tipo,
+        "v_pu": 1.0, "angle_deg": 0.0, "p_gen_mw": 0.0,
+        "q_min_mvar": 0.0, "q_max_mvar": 0.0,
+        "p_load_mw": 0.0, "q_load_mvar": 0.0,
+    }
+
+    v_val = None
+    mw_vals = []
+    mvar_vals = []
+    bare_vals = []
+    for tok in parts[4:]:
+        tl = tok.lower()
+        num_m = re.search(r'[-+]?\d*[.,]?\d+', tok)
+        if not num_m:
+            continue
+        val = float(num_m.group(0).replace(",", "."))
+        if "mvar" in tl:                                   # check before 'mw'/'v'
+            mvar_vals.append(val)
+        elif "mw" in tl:
+            mw_vals.append(val)
+        elif re.search(r'v\s*[=:]?\s*[-+]?\d', tl) or "pu" in tl:
+            v_val = val
+        else:
+            bare_vals.append(val)
+
+    complete = False
+    resume = None
+    if tipo == 2:  # Referência — v_pu optional (defaults to 1.0)
+        if v_val is not None:
+            bus["v_pu"] = v_val
+        elif bare_vals:
+            bus["v_pu"] = bare_vals[0]
+        complete = True
+    elif tipo == 1:  # PV — needs Pg; V setpoint optional
+        pg = mw_vals[0] if mw_vals else (bare_vals[0] if bare_vals else None)
+        if pg is not None:
+            bus["p_gen_mw"] = pg
+        if v_val is not None:
+            bus["v_pu"] = v_val
+        elif len(bare_vals) >= 2:
+            bus["v_pu"] = bare_vals[1]
+        if pg is None:
+            complete, resume = False, "pg"
+        else:
+            complete = True
+    else:  # PQ — needs Pl and Ql
+        pl = mw_vals[0] if mw_vals else (bare_vals[0] if bare_vals else None)
+        ql = mvar_vals[0] if mvar_vals else (bare_vals[1] if len(bare_vals) >= 2 else None)
+        if pl is not None:
+            bus["p_load_mw"] = pl
+        if ql is not None:
+            bus["q_load_mvar"] = ql
+        if pl is None:
+            complete, resume = False, "pl"
+        elif ql is None:
+            complete, resume = False, "ql"
+        else:
+            complete = True
+
+    return bus, complete, resume
 
 
 _NET_HELP = {
@@ -439,6 +579,112 @@ def _net_is_back(text: str) -> bool:
     return text.strip().lower() in ("voltar", "volta", "anterior", "back")
 
 
+def _net2_prev_field(field: str, tipo) -> str:
+    """Return the previous sub-question for a bus, respecting the type branch."""
+    if field == "name":
+        return "number"
+    if field == "kv":
+        return "name"
+    if field == "tipo":
+        return "kv"
+    if field == "pg":
+        return "tipo"
+    if field == "v_pu":
+        return "pg" if tipo == 1 else "tipo"
+    if field == "qmin":
+        return "v_pu"
+    if field == "qmax":
+        return "qmin"
+    if field == "pl":
+        return "tipo"
+    if field == "ql":
+        return "pl"
+    return "number"
+
+
+def _net2_field_prompt(field: str, current: dict) -> str:
+    """Re-ask a single bus sub-question (used by voltar and mid-entry guards)."""
+    name = current.get("name", "")
+    num = current.get("number", "")
+    if field == "number":
+        return "Número da barra (1 a 99999):"
+    if field == "name":
+        return f"Nome da barra **{num}** (até 12 caracteres):"
+    if field == "kv":
+        return f"Tensão nominal de **{name}** em kV (ex: **230**):"
+    if field == "tipo":
+        return (
+            f"Tipo da barra **{name}**:\n\n"
+            "**0** — PQ (carga)\n\n**1** — PV (geração)\n\n**2** — Referência (slack)"
+        )
+    if field == "pg":
+        return f"Geração ativa de **{name}** em MW (ex: **100**):"
+    if field == "v_pu":
+        return f"Tensão setpoint de **{name}** em pu (ex: **1.02**):"
+    if field == "qmin":
+        return "Qmin em Mvar (ex: **-100**):"
+    if field == "qmax":
+        return "Qmax em Mvar (ex: **100**):"
+    if field == "pl":
+        return f"Carga ativa de **{name}** em MW (ex: **100**; use **0** se sem carga):"
+    if field == "ql":
+        return "Carga reativa em Mvar (ex: **50**; use **0** se sem reativo):"
+    return "Continue com os dados da barra."
+
+
+def _net2_handle_back(data: dict) -> str:
+    """Field-level 'voltar' inside NET2_BUSES.
+
+    - Mid-entry (a value/identity sub-question): step back ONE sub-field, keeping
+      the data already entered for the current bus.
+    - First question of the very first bus, or the count question: return to
+      NET1_SETUP.
+    - First question of a LATER bus: step back to re-enter the previous bus,
+      preserving all earlier registered buses.
+    """
+    net2 = data.setdefault("net2", {"total": None, "idx": 0, "field": "count", "current": {}})
+    network = data.setdefault("network", {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []})
+    field = net2.get("field", "count")
+    current = net2.setdefault("current", {})
+    registered = network.setdefault("buses", [])
+
+    # Count question, or the very first question of the very first bus → NET1_SETUP
+    if field == "count" or (field == "number" and net2.get("idx", 0) == 0 and not registered):
+        st.session_state.sim_step = "NET1_SETUP"
+        data.pop("net2", None)
+        net = data.get("network", {})
+        return (
+            "Voltando à configuração inicial.\n\n"
+            f"Título atual: **{net.get('title','—')}** | Base: **{net.get('base_mva',100)} MVA**\n\n"
+            "Informe o novo título e base MVA, ou **confirmar** para manter."
+        )
+
+    total = net2.get("total")
+
+    # First question of a LATER bus → re-open the previous bus for editing
+    if field == "number":
+        prev_bus = registered.pop() if registered else None
+        net2["idx"] = max(0, net2.get("idx", 1) - 1)
+        net2["current"] = {}
+        net2["field"] = "number"
+        total_lbl = f" de {total}" if total else ""
+        freed = f" (barra **{prev_bus['number']}** liberada para reedição)" if prev_bus else ""
+        return (
+            f"Voltando à barra anterior{freed}.\n\n"
+            f"**Barra {net2['idx'] + 1}{total_lbl}.** Número da barra (1 a 99999):"
+        )
+
+    # Mid-entry → step back one sub-field, preserving the current bus's data
+    prev = _net2_prev_field(field, current.get("tipo"))
+    net2["field"] = prev
+    total_lbl = f" de {total}" if total else ""
+    return (
+        f"Voltando um passo.\n\n"
+        f"**Barra {net2.get('idx', 0) + 1}{total_lbl}.**\n\n"
+        + _net2_field_prompt(prev, current)
+    )
+
+
 def _net_finalize_bus(data: dict, current: dict) -> str:
     """Commit current bus to network, advance index, return next prompt."""
     network = data["network"]
@@ -554,6 +800,11 @@ def _handle_net_state(user_text: str):
     step = st.session_state.sim_step
     data = st.session_state.sim_data
 
+    # NET2_BUSES has field-level "voltar" (back one sub-question / previous bus),
+    # so it must not fall through to the global step-level back handler below.
+    if step == "NET2_BUSES" and _net_is_back(user_text):
+        return _net2_handle_back(data)
+
     # Global: voltar
     if _net_is_back(user_text) and step in _NET_BACK:
         prev_step = _NET_BACK[step]
@@ -648,12 +899,47 @@ def _handle_net_state(user_text: str):
         # Phase 2: collecting per-bus fields
         idx = net2["idx"]
         current = net2.setdefault("current", {})
+        existing = {b["number"] for b in network["buses"]}
+
+        # Guard: a line-definition message must never be swallowed as a bus field.
+        if _looks_like_line_def(user_text):
+            return (
+                "Ainda estou coletando os dados das **barras** — a barra atual "
+                f"(**{idx + 1}**) ainda não foi finalizada. As linhas são definidas "
+                "só depois que todas as barras estiverem prontas.\n\n"
+                + _net2_field_prompt(field, current)
+            )
+
+        # Guard: a full record for a DIFFERENT bus, arriving in the middle of
+        # field-by-field entry, must not be misassigned to the current sub-field.
+        if field != "number":
+            other_bus, _oc, _ores = _parse_compact_bus(user_text)
+            if other_bus is not None:
+                return (
+                    "Recebi o que parece ser o registro completo de **outra barra** "
+                    f"(número **{other_bus['number']}**), mas ainda estou preenchendo "
+                    f"a barra **{idx + 1}**. Finalize esta barra primeiro "
+                    "(ou digite `voltar` para corrigir).\n\n"
+                    + _net2_field_prompt(field, current)
+                )
 
         if field == "number":
+            # Try a full compact line first: number, name, kV, type[, values].
+            bus, complete, resume = _parse_compact_bus(user_text)
+            if bus is not None:
+                if bus["number"] in existing:
+                    return f"Número **{bus['number']}** já existe. Informe um número diferente:"
+                if complete:
+                    # All required fields present — register and advance immediately.
+                    return _net_finalize_bus(data, bus)
+                # Partial compact: keep what was parsed, resume field-by-field.
+                net2["current"] = dict(bus)
+                net2["field"] = resume
+                return _net2_field_prompt(resume, bus)
+            # Bare bus number → proceed field-by-field.
             n = _parse_net_int(user_text, 1, 99999)
             if n is None:
                 return f"Número da barra {idx + 1} (1 a 99999, ex: **{idx + 1}**):"
-            existing = {b["number"] for b in network["buses"]}
             if n in existing:
                 return f"Número **{n}** já existe. Informe um número diferente:"
             current["number"] = n
@@ -1639,12 +1925,7 @@ def _current_step_question() -> str:
     if step == "NET7_RESULTS":
         return "O que você observa? Digite `encerrar`, `inserir BESS`, `contingências` ou `editar rede`."
     if step == "STEP1":
-        return (
-            "**Qual base de dados deseja utilizar?**\n\n"
-            "1. **EPE (PDE)**\n\n"
-            "2. **ONS (PAR/PEL)**\n\n"
-            "3. **Minha própria rede** (montar do zero)"
-        )
+        return _STEP1_DB_QUESTION
     if step == "STEP2":
         return (
             "**Qual ano (ou anos) deseja estudar?** "
@@ -1790,9 +2071,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             "de dados. Existem duas fontes principais:\n\n"
             "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos.\n\n"
             "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos.\n\n"
-            "**Qual base de dados deseja utilizar?**\n\n"
-            "1. **EPE (PDE)** — planejamento de expansão de longo prazo (~10 anos)\n\n"
-            "2. **ONS (PAR/PEL)** — planejamento operacional de médio prazo (~5 anos)"
+            + _STEP1_DB_QUESTION
         )
 
     # ── IDLE: check for simulation intent ─────────────────────────────────────
@@ -1844,14 +2123,8 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/planejamento-da-transmissao/bases-de-dados-de-simulacao\n\n"
                 "Você pode ir baixando enquanto respondemos as próximas perguntas.\n\n"
                 "---\n\n"
-                "**Qual base de dados deseja utilizar?**\n\n"
-                "1. **EPE (PDE)** — foco em planejamento de expansão de longo prazo, "
-                "horizonte de ~10 anos. Modelos com maior incerteza sobre o futuro.\n\n"
-                "2. **ONS (PAR/PEL)** — foco em planejamento operacional de médio prazo, "
-                "horizonte de ~5 anos. Modelos mais detalhados e confiáveis para "
-                "decisões operativas.\n\n"
-                "Para estudos de inserção de tecnologias como BESS no SIN, o "
-                "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
+                + _STEP1_DB_QUESTION + "\n\n"
+                + _STEP1_DB_RECOMMENDATION
             )
         if _is_lt_data_message(user_text):
             pending_lt = _parse_lt_params(user_text)
@@ -1941,9 +2214,7 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Certo! Seguindo pelo fluxo de inserção em caso existente.\n\n"
                 "Os parâmetros da LT ficam registrados para referência.\n\n"
                 "---\n\n"
-                "**Qual base de dados deseja utilizar?**\n\n"
-                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos.\n\n"
-                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos."
+                + _STEP1_DB_QUESTION
             )
 
         return (
@@ -2711,13 +2982,8 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.simulation_mode = True
             st.session_state.sim_status = "active"
             return (
-                "**Qual base de dados deseja utilizar?**\n\n"
-                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos. "
-                "Modelos com maior incerteza sobre o futuro.\n\n"
-                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos. "
-                "Modelos mais detalhados e confiáveis para decisões operativas.\n\n"
-                "Para estudos de inserção de tecnologias como BESS no SIN, o "
-                "PAR/PEL do ONS é geralmente preferível por ter modelos mais detalhados."
+                _STEP1_DB_QUESTION + "\n\n"
+                + _STEP1_DB_RECOMMENDATION
             )
 
         # BUG 2b — New year (2026–2040) → restart from STEP3 keeping same database

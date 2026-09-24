@@ -108,6 +108,9 @@ _handle_sim_state  = _app._handle_sim_state
 _handle_net_state  = _app._handle_net_state
 _is_lt_data_message = _app._is_lt_data_message
 _parse_lt_params    = _app._parse_lt_params
+_current_step_question = _app._current_step_question
+_parse_compact_bus  = _app._parse_compact_bus
+_looks_like_line_def = _app._looks_like_line_def
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -747,6 +750,240 @@ set_active("STEP7", {"sim_type": "BESS", "db": "ONS", "year": 2028, "scenario": 
 r = _handle_sim_state("barra 1001")
 check("STEP7 bus number still accepted for BESS", "1001" in (r or "") or _ss["sim_data"].get("bess_bus") == "1001",
       f"resp={r}, data={_ss['sim_data']}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 13 — FIX 1: option 3 appears in EVERY STEP1 prompt variant
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 13: FIX 1 — option 3 in every STEP1 prompt ═══\n")
+
+
+def _lists_option3(s):
+    if not s:
+        return False
+    low = s.lower()
+    return "própria rede" in low and re.search(r"\b3\b", s) is not None
+
+
+# Variant: canonical constant
+check("constant _STEP1_DB_QUESTION lists option 3", _lists_option3(_app._STEP1_DB_QUESTION))
+
+# Variant: _current_step_question at STEP1 (re-prompt / pause-resume nudge)
+reset_idle()
+set_active("STEP1", {"sim_type": "BESS"})
+check("_current_step_question(STEP1) lists option 3", _lists_option3(_current_step_question()))
+
+# Variant: PRIMARY intro (fresh simulation trigger from IDLE, with EPE/ONS links)
+reset_idle()
+resp_intro = _handle_sim_state("Quero simular a inserção de um BESS no sistema")
+check("primary intro is the STEP1 prompt", _ss["sim_step"] == "STEP1", f"step={_ss['sim_step']}")
+check("primary intro lists option 3", _lists_option3(resp_intro), f"resp={resp_intro[:160] if resp_intro else None}")
+check("primary intro still has SINTEGRE/EPE links",
+      resp_intro and "ons.org.br" in resp_intro and "epe.gov.br" in resp_intro)
+
+# Variant: _RESTART handler (restart while mid-flow)
+reset_idle()
+set_active("STEP7", {"sim_type": "BESS", "db": "ONS"})
+resp_restart = _handle_sim_state("quero simular")
+check("_RESTART message lists option 3", _lists_option3(resp_restart), f"resp={resp_restart[:160] if resp_restart else None}")
+
+# Variant: IDLE_LT_NET_CHOICE → option 2 (insert in existing case) renders STEP1 DB question
+reset_idle()
+_handle_sim_state(MSG_GABRIEL)
+_handle_sim_state("sim")
+resp_ltchoice = _handle_sim_state("2")
+check("IDLE_LT_NET_CHOICE opt 2 DB question lists option 3", _lists_option3(resp_ltchoice),
+      f"resp={resp_ltchoice[:160] if resp_ltchoice else None}")
+
+# Variant: STEP1 unrecognized-answer retry
+reset_idle()
+set_active("STEP1", {"sim_type": "BESS"})
+resp_retry = _handle_sim_state("qwertyuiop")
+check("STEP1 retry lists option 3", _lists_option3(resp_retry), f"resp={resp_retry[:160] if resp_retry else None}")
+
+# Variant: STEP12 restart-from-scratch
+reset_idle()
+set_active("STEP12", {"sim_type": "BESS", "db": "ONS", "years": [2028], "year_idx": 0})
+resp_step12 = _handle_sim_state("reiniciar")
+check("STEP12 restart DB question lists option 3", _lists_option3(resp_step12),
+      f"step={_ss['sim_step']}, resp={resp_step12[:160] if resp_step12 else None}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 14 — FIX 2: exact 3-message compact bus sequence (no field bleed)
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 14: FIX 2 — compact 3-bus sequence ═══\n")
+
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 3, "idx": 0, "field": "number", "current": {}},
+})
+_handle_sim_state("1, Barra A, 230 kV, referência, V=1.02")
+_handle_sim_state("2, Barra B, 230 kV, PV, 150 MW, V=1.01")
+_handle_sim_state("3, Barra C, 230 kV, PQ, 200 MW, 60 Mvar")
+
+buses = _ss["sim_data"]["network"]["buses"]
+check("compact: exactly 3 buses registered", len(buses) == 3, f"got {len(buses)}: {buses}")
+
+if len(buses) == 3:
+    b1, b2, b3 = buses
+    # Bus 1 — REF
+    check("compact bus1 number=1", b1["number"] == 1, f"{b1}")
+    check("compact bus1 name=Barra_A (no bleed)", b1["name"] == "Barra_A", f"name={b1['name']}")
+    check("compact bus1 kv=230", abs(b1["kv"] - 230.0) < 1e-9, f"kv={b1['kv']}")
+    check("compact bus1 tipo=2 (Referência)", b1["tipo"] == 2, f"tipo={b1['tipo']}")
+    check("compact bus1 v_pu=1.02", abs(b1["v_pu"] - 1.02) < 1e-9, f"v_pu={b1['v_pu']}")
+    # Bus 2 — PV
+    check("compact bus2 number=2", b2["number"] == 2, f"{b2}")
+    check("compact bus2 name=Barra_B (no bleed)", b2["name"] == "Barra_B", f"name={b2['name']}")
+    check("compact bus2 tipo=1 (PV)", b2["tipo"] == 1, f"tipo={b2['tipo']}")
+    check("compact bus2 p_gen_mw=150", abs(b2["p_gen_mw"] - 150) < 1e-9, f"pg={b2['p_gen_mw']}")
+    check("compact bus2 v_pu=1.01", abs(b2["v_pu"] - 1.01) < 1e-9, f"v_pu={b2['v_pu']}")
+    # Bus 3 — PQ
+    check("compact bus3 number=3", b3["number"] == 3, f"{b3}")
+    check("compact bus3 name=Barra_C (no bleed)", b3["name"] == "Barra_C", f"name={b3['name']}")
+    check("compact bus3 tipo=0 (PQ)", b3["tipo"] == 0, f"tipo={b3['tipo']}")
+    check("compact bus3 p_load_mw=200", abs(b3["p_load_mw"] - 200) < 1e-9, f"pl={b3['p_load_mw']}")
+    check("compact bus3 q_load_mvar=60", abs(b3["q_load_mvar"] - 60) < 1e-9, f"ql={b3['q_load_mvar']}")
+
+check("compact 3-bus → advanced to NET3_LINES", _ss["sim_step"] == "NET3_LINES", f"step={_ss['sim_step']}")
+
+# Direct unit tests of the compact parser
+_b, _c, _r = _parse_compact_bus("1, Barra A, 230 kV, referência, V=1.02")
+check("parser: REF compact complete", _b is not None and _c and _b["tipo"] == 2 and abs(_b["v_pu"] - 1.02) < 1e-9)
+_b, _c, _r = _parse_compact_bus("2, Barra B, 230 kV, PV, 150 MW, V=1.01")
+check("parser: PV compact complete", _b is not None and _c and _b["tipo"] == 1 and _b["p_gen_mw"] == 150)
+_b, _c, _r = _parse_compact_bus("3, Barra C, 230 kV, PQ, 200 MW, 60 Mvar")
+check("parser: PQ compact complete", _b is not None and _c and _b["tipo"] == 0 and _b["q_load_mvar"] == 60)
+_b, _c, _r = _parse_compact_bus("1")
+check("parser: bare number is NOT a compact bus", _b is None)
+_b, _c, _r = _parse_compact_bus("4, Barra D, 230 kV, PQ, 200 MW")
+check("parser: partial PQ → incomplete, resume 'ql'", _b is not None and not _c and _r == "ql", f"complete={_c}, resume={_r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 15 — FIX 2: field-by-field entry (one answer per message) still works
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 15: FIX 2 — field-by-field entry ═══\n")
+
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 2, "idx": 0, "field": "number", "current": {}},
+})
+_handle_sim_state("1")        # bare number
+_handle_sim_state("REF_A")    # name
+_handle_sim_state("230")      # kV
+_handle_sim_state("2")        # tipo REF
+_handle_sim_state("1.05")     # v_pu → finalize bus 1
+_handle_sim_state("2")        # bare number bus 2
+_handle_sim_state("CARGA_B")  # name
+_handle_sim_state("230")      # kV
+_handle_sim_state("0")        # tipo PQ
+_handle_sim_state("100")      # pl
+_handle_sim_state("40")       # ql → finalize bus 2
+
+fbf_buses = _ss["sim_data"]["network"]["buses"]
+check("field-by-field: 2 buses registered", len(fbf_buses) == 2, f"got {len(fbf_buses)}")
+if len(fbf_buses) == 2:
+    check("fbf bus1 REF, v_pu=1.05",
+          fbf_buses[0]["tipo"] == 2 and abs(fbf_buses[0]["v_pu"] - 1.05) < 1e-9, f"{fbf_buses[0]}")
+    check("fbf bus2 PQ, pl=100, ql=40",
+          fbf_buses[1]["tipo"] == 0 and fbf_buses[1]["p_load_mw"] == 100 and fbf_buses[1]["q_load_mvar"] == 40,
+          f"{fbf_buses[1]}")
+check("field-by-field → NET3_LINES", _ss["sim_step"] == "NET3_LINES", f"step={_ss['sim_step']}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 16 — FIX 2: "voltar" mid-bus entry goes back one field, not to NET1
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 16: FIX 2 — voltar during bus entry ═══\n")
+
+# Mid-entry (field=kv) with one already-registered bus → back one field (kv→name)
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0,
+                "buses": [{"number": 1, "name": "REF", "kv": 230.0, "tipo": 2, "v_pu": 1.05,
+                           "angle_deg": 0, "p_gen_mw": 0, "q_min_mvar": -100, "q_max_mvar": 100,
+                           "p_load_mw": 0, "q_load_mvar": 0}],
+                "lines": []},
+    "net2": {"total": 2, "idx": 1, "field": "kv", "current": {"number": 2, "name": "CARGA"}},
+})
+resp_back1 = _handle_sim_state("voltar")
+check("voltar mid-entry stays in NET2_BUSES", _ss["sim_step"] == "NET2_BUSES", f"step={_ss['sim_step']}")
+check("voltar mid-entry: kv → name (one step)", _ss["sim_data"]["net2"]["field"] == "name",
+      f"field={_ss['sim_data']['net2']['field']}")
+check("voltar mid-entry preserves already-registered bus",
+      len(_ss["sim_data"]["network"]["buses"]) == 1, f"buses={_ss['sim_data']['network']['buses']}")
+check("voltar mid-entry preserves current bus data",
+      _ss["sim_data"]["net2"]["current"].get("number") == 2)
+
+# Back navigation respects the type branch: v_pu (PV) → pg
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 2, "idx": 0, "field": "v_pu",
+             "current": {"number": 1, "name": "GER", "kv": 230.0, "tipo": 1, "p_gen_mw": 150}},
+})
+_handle_sim_state("voltar")
+check("voltar from v_pu (PV) → pg", _ss["sim_data"]["net2"]["field"] == "pg",
+      f"field={_ss['sim_data']['net2']['field']}")
+
+# First question of the very first bus → NET1_SETUP
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 2, "idx": 0, "field": "number", "current": {}},
+})
+_handle_sim_state("voltar")
+check("voltar at first bus/first field → NET1_SETUP", _ss["sim_step"] == "NET1_SETUP",
+      f"step={_ss['sim_step']}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 17 — FIX 2: line-def / other-bus message mid-entry is not absorbed
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 17: FIX 2 — stray records during bus entry ═══\n")
+
+check("_looks_like_line_def detects from-to", _looks_like_line_def("1-2, circuito 1, R=0.5 X=5 Q=20"))
+check("_looks_like_line_def rejects a bus line", not _looks_like_line_def("1, Barra A, 230 kV, referência, V=1.02"))
+
+# Line-definition message while still entering a bus (field=name)
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 2, "idx": 0, "field": "name", "current": {"number": 1}},
+})
+resp_line = _handle_sim_state("1-2, circuito 1, R=0.5 X=5 Q=20")
+check("line-def not consumed as name (field unchanged)",
+      _ss["sim_data"]["net2"]["field"] == "name", f"field={_ss['sim_data']['net2']['field']}")
+check("line-def did not set a name on the current bus",
+      "name" not in _ss["sim_data"]["net2"]["current"], f"current={_ss['sim_data']['net2']['current']}")
+check("line-def response clarifies (mentions barra/linha)",
+      resp_line and ("barra" in resp_line.lower() or "linha" in resp_line.lower()))
+
+# Full record for a DIFFERENT bus arriving mid-entry (field=name)
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": 3, "idx": 0, "field": "name", "current": {"number": 1}},
+})
+resp_other = _handle_sim_state("2, Barra B, 230 kV, PV, 150 MW, V=1.01")
+check("other-bus record not consumed as name (field unchanged)",
+      _ss["sim_data"]["net2"]["field"] == "name" and "name" not in _ss["sim_data"]["net2"]["current"],
+      f"field={_ss['sim_data']['net2']['field']}, current={_ss['sim_data']['net2']['current']}")
+check("other-bus record did not register a stray bus",
+      len(_ss["sim_data"]["network"]["buses"]) == 0, f"buses={_ss['sim_data']['network']['buses']}")
+check("other-bus response clarifies (mentions outra barra)",
+      resp_other and "outra barra" in resp_other.lower(), f"resp={resp_other[:160] if resp_other else None}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
