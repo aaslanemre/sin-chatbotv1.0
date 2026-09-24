@@ -174,6 +174,13 @@ Your knowledge is strictly limited to:
   that the user copies into a notepad).
   This distinction is critical — loading PWF instead of SAV
   will result in a non-converged case.
+  EXCEPTION — NETWORK MODE (build from scratch): when the user
+  is building a new network from scratch (sim_type = NETWORK),
+  the assistant generates a COMPLETE PWF file because no SAV
+  base case exists. In this mode only, a full PWF file is
+  correct and expected. The "always SAV, never full PWF" rule
+  still applies to all BESS/STATCOM insertion flows into
+  PAR/PEL/PDE cases.
 
 ## CONTEXT HANDLING
 - If context IS relevant: use it, stay grounded, cite it.

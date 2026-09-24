@@ -6,6 +6,13 @@ import unicodedata
 import streamlit as st
 from agents.pwf_agent import generate_dbar_block, generate_statcom_block, generate_contingency_block
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
+from agents.network_builder import (
+    convert_line_params,
+    validate_network,
+    build_full_pwf,
+    diagnose_nonconvergence,
+    format_network_summary,
+)
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
@@ -16,7 +23,7 @@ from auth.auth_service import (
 )
 
 st.set_page_config(
-    page_title="Assistente SIN v6.1",
+    page_title="Assistente SIN v6.3.0",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -220,6 +227,1011 @@ _PDE_SCENARIO_NAMES = {
 def _is_simulation_intent(text: str) -> bool:
     t = text.lower()
     return any(trigger in t for trigger in _SIMULATION_INTENT_TRIGGERS)
+
+
+_NETWORK_INTENT_TRIGGERS = [
+    "rede do zero", "montar uma rede", "montar rede", "criar um caso novo",
+    "criar caso novo", "rede própria", "rede propria", "novo caso",
+    "criar rede", "construir rede", "caso do zero", "criar um caso",
+    "montar caso", "rede nova", "criar uma rede",
+]
+
+
+def _is_network_intent(text: str) -> bool:
+    t = text.lower()
+    return any(trigger in t for trigger in _NETWORK_INTENT_TRIGGERS)
+
+
+# ── NET state helpers ─────────────────────────────────────────────────────────
+
+def _parse_net_int(text: str, min_val: int = 1, max_val: int = 99999):
+    """Return first integer found in text within [min_val, max_val], or None."""
+    m = re.search(r'\b(\d+)\b', text.strip())
+    if m:
+        n = int(m.group(1))
+        if min_val <= n <= max_val:
+            return n
+    return None
+
+
+def _parse_net_float(text: str, min_val=None, max_val=None):
+    """Return first float found in text (accepts comma decimal), or None."""
+    m = re.search(r'[-+]?\d*[.,]?\d+', text.strip())
+    if m:
+        try:
+            v = float(m.group(0).replace(",", "."))
+            if min_val is not None and v < min_val:
+                return None
+            if max_val is not None and v > max_val:
+                return None
+            return v
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_bus_tipo(text: str):
+    """Parse bus type (0, 1, 2) from user text."""
+    t = text.strip().lower()
+    if re.search(r'\b0\b', t) or any(w in t for w in ["pq", "carga"]):
+        return 0
+    if re.search(r'\b1\b', t) or any(w in t for w in ["pv", "geração", "geracao", "geração controlada"]):
+        return 1
+    if re.search(r'\b2\b', t) or any(w in t for w in ["ref", "referência", "referencia", "slack", "swing"]):
+        return 2
+    return None
+
+
+def _parse_line_mode(text: str):
+    """Return 'per_km', 'pu', or 'pct' from user text, or None."""
+    t = text.strip().lower()
+    if t in ("1",) or any(w in t for w in ["por km", "per_km", "km", "/km", "ohm"]):
+        return "per_km"
+    if t in ("2",) or any(w in t for w in ["pu", "por unidade", "per unit"]):
+        return "pu"
+    if t in ("3",) or any(w in t for w in ["pct", "percent", "%", "mvar", "por cento", "dlin"]):
+        return "pct"
+    return None
+
+
+def _parse_four_floats(text: str):
+    """Extract up to 4 floats from text (handles R=x X=y format and bare values)."""
+    # Try key=value pairs first
+    vals = {}
+    for key in ("r", "x", "b", "l", "q"):
+        m = re.search(rf'\b{key}\s*[=:]\s*([-+]?\d*[.,]?\d+)', text, re.IGNORECASE)
+        if m:
+            vals[key.lower()] = float(m.group(1).replace(",", "."))
+    if vals:
+        return vals
+
+    # Bare sequence of numbers
+    nums = [float(x.replace(",", ".")) for x in re.findall(r'[-+]?\d*[.,]?\d+', text)]
+    return nums
+
+
+_NET_HELP = {
+    "NET1_SETUP": (
+        "**Título do caso:** nome livre para identificar sua rede (ex: 'LT 230kV Teste'). "
+        "Não afeta o cálculo.\n\n"
+        "**Base MVA:** potência de referência do sistema. O padrão no Brasil é **100 MVA**. "
+        "Altere apenas se seus dados de R/X já estiverem em outra base.\n\n"
+        "Você pode responder os dois juntos (ex: `LT 230kV, 100 MVA`) ou separados."
+    ),
+    "NET2_count": (
+        "**Número de barras:**\n"
+        "Uma barra representa uma subestação ou nó da rede. Redes simples têm 2–5 barras. "
+        "O limite aqui é 20.\n\n"
+        "Toda rede precisa de:\n"
+        "- Exatamente **1 barra de referência** (tipo 2 / slack)\n"
+        "- Pelo menos **1 barra de carga** ou geração\n\n"
+        "Exemplo mínimo: 2 barras (1 referência + 1 carga), 1 linha."
+    ),
+    "NET2_number": (
+        "**Número da barra:** identificador único entre 1 e 99999.\n"
+        "Pode ser qualquer valor (ex: 1, 2, 3 ou 1001, 1002). "
+        "Não pode se repetir."
+    ),
+    "NET2_name": (
+        "**Nome da barra:** rótulo de até 12 caracteres.\n"
+        "Exemplos: GER_USINA, CARGA_CID, REF_SWING, SE_230.\n"
+        "Use apenas letras, números e sublinhados."
+    ),
+    "NET2_kv": (
+        "**Tensão nominal em kV:** nível de tensão da barra.\n"
+        "Tensões padrão do SIN: 138, 230, 345, 440, 500, 765 kV.\n"
+        "Todas as barras conectadas por linhas simples devem ter a mesma tensão."
+    ),
+    "NET2_tipo": (
+        "**Tipos de barra no ANAREDE:**\n\n"
+        "**0 — PQ (carga):** P e Q fixos. Use para subestações de consumo.\n\n"
+        "**1 — PV (geração):** você define P e a tensão-alvo; o ANAREDE ajusta Q.\n\n"
+        "**2 — Referência (slack):** OBRIGATÓRIA — deve existir exatamente UMA. "
+        "Balancea toda a geração/carga. Geralmente é a maior usina."
+    ),
+    "NET2_pg": "**Geração ativa em MW:** potência que o gerador injeta na rede. Exemplo: 100 MW.",
+    "NET2_v_pu": (
+        "**Tensão setpoint em pu:** valor que o gerador/referência tentará manter.\n"
+        "Faixa típica: 0.95–1.05 pu. Exemplo: 1.02 pu."
+    ),
+    "NET2_qmin": "**Qmin em Mvar:** limite mínimo de geração reativa. Negativo = absorção. Exemplo: −50.",
+    "NET2_qmax": "**Qmax em Mvar:** limite máximo de geração reativa. Exemplo: 50.",
+    "NET2_pl": "**Carga ativa em MW:** potência consumida. Exemplo: 100 MW. Use 0 se não houver carga.",
+    "NET2_ql": "**Carga reativa em Mvar:** reativo consumido. Tipicamente 20–40% da carga ativa. Use 0 se não houver.",
+    "NET3_count": (
+        "**Número de linhas:**\n"
+        "Para N barras, você precisa de pelo menos N−1 linhas para conectar a rede.\n\n"
+        "**Modos de parâmetros:**\n"
+        "**1 — por km:** R(Ω/km), X(Ω/km), B(μS/km) + comprimento → conversão automática\n"
+        "**2 — pu:** R, X, B em por unidade na base do sistema\n"
+        "**3 — %/Mvar:** R%, X%, Q em Mvar (direto para DLIN)"
+    ),
+    "NET3_from": "**Barra origem:** número de onde a linha parte. Deve ser uma barra já definida.",
+    "NET3_to": "**Barra destino:** número onde a linha chega. Deve ser diferente da origem.",
+    "NET3_circuit": "**Circuito:** normalmente 1. Use 2, 3... para circuitos paralelos entre o mesmo par de barras.",
+    "NET3_mode": (
+        "**Modo de entrada:**\n"
+        "1 ou `por_km` — R(Ω/km), X(Ω/km), B(μS/km) + comprimento em km\n"
+        "2 ou `pu` — R, X, B em pu na base do sistema\n"
+        "3 ou `%` — R%, X%, susceptância em Mvar (valores prontos para o DLIN)"
+    ),
+    "NET3_values": (
+        "**Exemplo de entrada por km:**\n"
+        "`R=0.0257 X=0.2995 B=5.4542 L=180`\n"
+        "ou compacto: `0.0257 0.2995 5.4542 180`\n\n"
+        "**Exemplo em %/Mvar:**\n"
+        "`R=0.87 X=10.19 Q=51.93`\n"
+        "ou compacto: `0.87 10.19 51.93`"
+    ),
+    "NET4_REVIEW": (
+        "**Comandos disponíveis:**\n"
+        "- `editar barra N` — redigitar dados da barra N\n"
+        "- `editar linha N` — redigitar dados da linha N\n"
+        "- `adicionar barra` — incluir nova barra\n"
+        "- `adicionar linha` — incluir nova linha\n"
+        "- `remover linha N` — remover a linha N\n"
+        "- `confirmar` — gerar o PWF (somente sem erros)"
+    ),
+    "NET5_GENERATE": (
+        "Copie o conteúdo do bloco de código e salve como arquivo `.pwf` "
+        "(ex: `minha_rede.pwf`) no seu computador. "
+        "Em seguida, abra o ANAREDE para carregar o arquivo."
+    ),
+    "NET6_RUN": (
+        "**QUESTÃO ABERTA:** O caminho exato de menu para abrir um arquivo PWF novo no ANAREDE "
+        "não foi confirmado pelo manual — não será inventado aqui.\n\n"
+        "Instrução geral: procure 'Abrir' ou 'Carregar arquivo' no menu principal do ANAREDE "
+        "e selecione o arquivo .pwf salvo. Após carregar, execute o fluxo com **Ctrl+R**."
+    ),
+    "NET7_RESULTS": (
+        "**Lendo os resultados:**\n"
+        "- Tensões aparecem próximas a cada barra no diagrama (pu ou kV)\n"
+        "- Fluxos aparecem nas extremidades das linhas (MW e Mvar)\n"
+        "- Hachura **VERMELHA**: sobrecarga ou sobretensão\n"
+        "- Hachura **AZUL**: subtensão\n\n"
+        "**Para salvar como SAV:** QUESTÃO ABERTA — procedimento não confirmado pelo manual."
+    ),
+}
+
+
+# ── NET state machine ─────────────────────────────────────────────────────────
+
+_NET_BACK = {
+    "NET2_BUSES": "NET1_SETUP",
+    "NET3_LINES": "NET2_BUSES",
+    "NET4_REVIEW": "NET3_LINES",
+    "NET5_GENERATE": "NET4_REVIEW",
+    "NET6_RUN": "NET5_GENERATE",
+    "NET7_RESULTS": "NET6_RUN",
+}
+
+
+def _net_help(key: str) -> str:
+    return _NET_HELP.get(key, "Sem ajuda disponível para esta etapa.")
+
+
+def _net_is_help(text: str) -> bool:
+    t = text.strip().lower()
+    return any(w in t for w in ["ajuda", "help", "não sei", "nao sei", "como", "o que é", "o que e"])
+
+
+def _net_is_back(text: str) -> bool:
+    return text.strip().lower() in ("voltar", "volta", "anterior", "back")
+
+
+def _net_finalize_bus(data: dict, current: dict) -> str:
+    """Commit current bus to network, advance index, return next prompt."""
+    network = data["network"]
+    net2 = data["net2"]
+    network["buses"].append(dict(current))
+    net2["idx"] += 1
+    net2["current"] = {}
+    total = net2["total"]
+    idx = net2["idx"]
+    bus_num = current["number"]
+    tipo_label = {0: "PQ", 1: "PV", 2: "Referência"}.get(current.get("tipo", 0), "?")
+    if idx >= total:
+        # All buses collected — move to NET3_LINES
+        st.session_state.sim_step = "NET3_LINES"
+        data.pop("net2", None)
+        return _net_lines_start(data)
+    net2["field"] = "number"
+    return (
+        f"✅ Barra **{bus_num}** ({tipo_label}) registrada.\n\n"
+        f"**Barra {idx + 1} de {total}.** Número da barra (1 a 99999):"
+    )
+
+
+def _net_lines_start(data: dict) -> str:
+    """Return the opening prompt for NET3_LINES."""
+    # Check if a line was pre-filled from pending_lt
+    pending_lt = data.get("pending_lt")
+    if pending_lt and data.get("network", {}).get("lines") is None:
+        data["network"]["lines"] = []
+    network = data.get("network", {})
+    buses = network.get("buses", [])
+    n_buses = len(buses)
+    bus_list = ", ".join(str(b["number"]) for b in buses)
+    data["net3"] = {"idx": 0, "field": "count", "current": {}}
+    if not network.get("lines"):
+        network["lines"] = []
+    return (
+        f"Ótimo! **{n_buses} barra(s)** registrada(s).\n\n"
+        f"Barras disponíveis: **{bus_list}**\n\n"
+        "**Quantas linhas a rede terá?**\n\n"
+        f"(Para {n_buses} barras conectadas, você precisa de pelo menos **{n_buses - 1}** linha(s))\n\n"
+        "💡 Digite `ajuda` para ver os modos de parâmetros disponíveis (por km, pu ou %)."
+    )
+
+
+def _net_finalize_line(data: dict, current: dict) -> str:
+    """Commit current line to network, advance index, return next prompt."""
+    network = data["network"]
+    net3 = data["net3"]
+    ln_id = len(network["lines"]) + 1
+    current["id"] = ln_id
+    network["lines"].append(dict(current))
+    net3["idx"] += 1
+    net3["current"] = {}
+    total = net3["total"]
+    idx = net3["idx"]
+    calc = current.get("calc_str", "")
+    calc_section = f"\n\n{calc}" if calc else ""
+    if idx >= total:
+        # All lines collected — move to NET4_REVIEW
+        st.session_state.sim_step = "NET4_REVIEW"
+        data.pop("net3", None)
+        return _net_show_review(data) + calc_section
+    net3["field"] = "from_bus"
+    buses = network.get("buses", [])
+    bus_list = ", ".join(str(b["number"]) for b in buses)
+    return (
+        f"✅ Linha **{ln_id}** (barras {current['from_bus']}–{current['to_bus']}) registrada."
+        + calc_section
+        + f"\n\n---\n\n**Linha {idx + 1} de {total}.**\n\n"
+        f"Barras disponíveis: **{bus_list}**\n\n"
+        "Barra **origem**:"
+    )
+
+
+def _net_show_review(data: dict) -> str:
+    """Return NET4_REVIEW prompt with summary table and validation issues."""
+    network = data.get("network", {})
+    summary = format_network_summary(network)
+    issues = validate_network(network)
+    errors = [i for i in issues if i["severity"] == "error"]
+    warnings = [i for i in issues if i["severity"] == "warning"]
+
+    parts = [f"**Revisão da rede:**\n\n{summary}"]
+
+    if errors:
+        parts.append("\n\n**❌ ERROS (impedem a geração do arquivo):**")
+        for e in errors:
+            parts.append(f"\n- {e['message']}\n  *Por quê:* {e['why_it_matters']}\n  *Como corrigir:* {e['how_to_fix']}")
+    if warnings:
+        parts.append("\n\n**⚠️ AVISOS:**")
+        for w in warnings:
+            parts.append(f"\n- {w['message']}\n  *Como corrigir:* {w['how_to_fix']}")
+    if not errors and not warnings:
+        parts.append("\n\n✅ **Nenhum erro ou aviso — rede pronta para gerar o arquivo PWF.**")
+
+    if errors:
+        parts.append(
+            "\n\n**Corrija os erros acima** antes de continuar.\n"
+            "Use `editar barra N`, `editar linha N`, `adicionar barra`, `adicionar linha`, `remover linha N`."
+        )
+    else:
+        parts.append(
+            "\n\nDigite **confirmar** para gerar o arquivo PWF, "
+            "ou edite a rede com os comandos acima."
+        )
+
+    return "".join(parts)
+
+
+def _handle_net_state(user_text: str):
+    """Drive the NET* state machine. Returns response string or None."""
+    step = st.session_state.sim_step
+    data = st.session_state.sim_data
+
+    # Global: voltar
+    if _net_is_back(user_text) and step in _NET_BACK:
+        prev_step = _NET_BACK[step]
+        st.session_state.sim_step = prev_step
+        # Re-enter the previous step's prompt
+        if prev_step == "NET1_SETUP":
+            data.pop("net2", None)
+            net = data.get("network", {})
+            return (
+                f"Voltando à configuração inicial.\n\n"
+                f"Título atual: **{net.get('title','—')}** | Base: **{net.get('base_mva',100)} MVA**\n\n"
+                "Informe o novo título e base MVA, ou **confirmar** para manter."
+            )
+        if prev_step == "NET2_BUSES":
+            data.pop("net3", None)
+            net2_total = len(data.get("network", {}).get("buses", []))
+            return (
+                f"Voltando às barras. {net2_total} barra(s) registrada(s).\n\n"
+                + _net_lines_start(data).replace("Ótimo! ", "")
+            )
+        if prev_step == "NET3_LINES":
+            data.pop("net3", None)
+            return "Voltando às linhas.\n\n" + _net_lines_start(data)
+        if prev_step == "NET4_REVIEW":
+            return "Voltando à revisão.\n\n" + _net_show_review(data)
+        if prev_step == "NET5_GENERATE":
+            pwf = data.get("net_pwf", "")
+            return (
+                "Voltando ao arquivo gerado.\n\n"
+                f"```\n{pwf}\n```\n\n"
+                "Digite **continuar** para prosseguir."
+            )
+        if prev_step == "NET6_RUN":
+            return _net6_prompt(data)
+        return None
+
+    # ── NET1_SETUP ────────────────────────────────────────────────────────────
+    if step == "NET1_SETUP":
+        if _net_is_help(user_text):
+            return _net_help("NET1_SETUP") + "\n\n**Título e base MVA:**"
+        # Accept "confirmar" to keep defaults
+        t = user_text.strip()
+        network = data.setdefault("network", {
+            "title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []
+        })
+        if t.lower() in ("confirmar", "ok", "padrão", "padrao", "default"):
+            pass  # keep defaults
+        else:
+            # Try to parse title + base MVA
+            mva_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:mva|MVA)', t, re.IGNORECASE)
+            if mva_m:
+                network["base_mva"] = float(mva_m.group(1).replace(",", "."))
+                title_part = re.sub(r'[\d.,]+\s*(?:mva|MVA)', '', t, flags=re.IGNORECASE).strip().strip(",;-")
+                if title_part:
+                    network["title"] = title_part[:50]
+            else:
+                # Just a title, default base MVA
+                if t:
+                    network["title"] = t[:50]
+
+        data.setdefault("net_setup_field", "done")
+        st.session_state.sim_step = "NET2_BUSES"
+        data["net2"] = {"total": None, "idx": 0, "field": "count", "current": {}}
+        return (
+            f"✅ Caso: **{network['title']}** | Base: **{network['base_mva']} MVA**\n\n"
+            "**Quantas barras a rede terá?** (mínimo **2**, máximo **20**)\n\n"
+            "💡 Digite `ajuda` para saber como organizar as barras."
+        )
+
+    # ── NET2_BUSES ────────────────────────────────────────────────────────────
+    if step == "NET2_BUSES":
+        net2 = data.setdefault("net2", {"total": None, "idx": 0, "field": "count", "current": {}})
+        network = data.setdefault("network", {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []})
+        total = net2.get("total")
+        field = net2.get("field", "count")
+
+        if _net_is_help(user_text):
+            help_key = f"NET2_{field}" if f"NET2_{field}" in _NET_HELP else "NET2_count"
+            return _net_help(help_key) + f"\n\n*(Retomando pergunta sobre **{field}**)*"
+
+        # Phase 1: get bus count
+        if field == "count" or total is None:
+            n = _parse_net_int(user_text, 2, 20)
+            if n is None:
+                return "Quantas barras a rede terá? Informe um número entre **2** e **20**."
+            net2["total"] = n
+            net2["idx"] = 0
+            net2["field"] = "number"
+            net2["current"] = {}
+            return f"**Barra 1 de {n}.**\n\nNúmero da barra (1 a 99999, ex: **1**):"
+
+        # Phase 2: collecting per-bus fields
+        idx = net2["idx"]
+        current = net2.setdefault("current", {})
+
+        if field == "number":
+            n = _parse_net_int(user_text, 1, 99999)
+            if n is None:
+                return f"Número da barra {idx + 1} (1 a 99999, ex: **{idx + 1}**):"
+            existing = {b["number"] for b in network["buses"]}
+            if n in existing:
+                return f"Número **{n}** já existe. Informe um número diferente:"
+            current["number"] = n
+            net2["field"] = "name"
+            return f"Nome da barra **{n}** (até 12 caracteres, ex: **SE_{n}**):"
+
+        if field == "name":
+            name = re.sub(r'\s+', '_', user_text.strip())[:12]
+            if not name:
+                return "Nome não pode estar vazio. Informe o nome da barra (ex: **BARRA_A**):"
+            current["name"] = name
+            net2["field"] = "kv"
+            return f"Tensão nominal de **{name}** em kV (ex: **230**):"
+
+        if field == "kv":
+            kv = _parse_net_float(user_text, 0.1)
+            if kv is None:
+                return "Tensão nominal em kV (ex: **230**, 138, 500):"
+            current["kv"] = kv
+            net2["field"] = "tipo"
+            return (
+                f"Tipo da barra **{current.get('name','')}** ({kv} kV):\n\n"
+                "**0** — PQ (carga — P e Q fixos)\n\n"
+                "**1** — PV (geração — tensão controlada)\n\n"
+                "**2** — Referência (slack — balanço do sistema, obrigatória)"
+            )
+
+        if field == "tipo":
+            tipo = _parse_bus_tipo(user_text)
+            if tipo is None:
+                return "Informe **0** (PQ), **1** (PV) ou **2** (Referência):"
+            current["tipo"] = tipo
+            current.setdefault("v_pu", 1.0)
+            current.setdefault("angle_deg", 0.0)
+            current.setdefault("p_gen_mw", 0.0)
+            current.setdefault("q_min_mvar", 0.0)
+            current.setdefault("q_max_mvar", 0.0)
+            current.setdefault("p_load_mw", 0.0)
+            current.setdefault("q_load_mvar", 0.0)
+            if tipo == 2:
+                net2["field"] = "v_pu"
+                return "Tensão de referência em pu (ex: **1.05**; faixa típica: 0.95–1.10):"
+            elif tipo == 1:
+                net2["field"] = "pg"
+                return f"Geração ativa de **{current.get('name','')}** em MW (ex: **100**):"
+            else:
+                net2["field"] = "pl"
+                return f"Carga ativa de **{current.get('name','')}** em MW (ex: **100**; use **0** se sem carga):"
+
+        if field == "pg":
+            pg = _parse_net_float(user_text, 0.0)
+            if pg is None:
+                return "Geração ativa em MW (ex: **100**; use 0 se sem geração):"
+            current["p_gen_mw"] = pg
+            net2["field"] = "v_pu"
+            return f"Tensão setpoint de **{current.get('name','')}** em pu (ex: **1.02**):"
+
+        if field == "v_pu":
+            v = _parse_net_float(user_text, 0.5, 1.5)
+            if v is None:
+                return "Tensão em pu (ex: **1.02**; faixa típica: 0.95–1.10):"
+            current["v_pu"] = v
+            if current.get("tipo") == 1:
+                net2["field"] = "qmin"
+                return "Qmin em Mvar — limite mínimo de reativo (ex: **-100**; negativo = absorção):"
+            else:
+                return _net_finalize_bus(data, current)
+
+        if field == "qmin":
+            qmin = _parse_net_float(user_text)
+            if qmin is None:
+                return "Qmin em Mvar (ex: **-100**):"
+            current["q_min_mvar"] = qmin
+            net2["field"] = "qmax"
+            return "Qmax em Mvar — limite máximo de reativo (ex: **100**):"
+
+        if field == "qmax":
+            qmax = _parse_net_float(user_text)
+            if qmax is None:
+                return "Qmax em Mvar (ex: **100**):"
+            current["q_max_mvar"] = qmax
+            return _net_finalize_bus(data, current)
+
+        if field == "pl":
+            pl = _parse_net_float(user_text, 0.0)
+            if pl is None:
+                return "Carga ativa em MW (ex: **100**; use **0** se sem carga):"
+            current["p_load_mw"] = pl
+            net2["field"] = "ql"
+            return "Carga reativa em Mvar (ex: **50**; use **0** se sem reativo):"
+
+        if field == "ql":
+            ql = _parse_net_float(user_text, 0.0)
+            if ql is None:
+                return "Carga reativa em Mvar (ex: **50**; use **0**):"
+            current["q_load_mvar"] = ql
+            return _net_finalize_bus(data, current)
+
+        return "Não entendi. Digite `ajuda` para orientação ou continue com os dados da barra."
+
+    # ── NET3_LINES ────────────────────────────────────────────────────────────
+    if step == "NET3_LINES":
+        net3 = data.setdefault("net3", {"total": None, "idx": 0, "field": "count", "current": {}})
+        network = data.setdefault("network", {})
+        network.setdefault("lines", [])
+        total = net3.get("total")
+        field = net3.get("field", "count")
+
+        if _net_is_help(user_text):
+            help_key = f"NET3_{field}" if f"NET3_{field}" in _NET_HELP else "NET3_count"
+            return _net_help(help_key) + "\n\n*(Retomando pergunta sobre a linha)*"
+
+        # Check for pre-filled line from pending_lt
+        if field == "count" and total is None:
+            pending_lt = data.get("pending_lt", {})
+            if pending_lt and data.get("net3_lt_prefilled") is None:
+                # Pre-fill line from pending_lt
+                kv = pending_lt.get("voltage_kv")
+                r = pending_lt.get("R_ohm_km")
+                x = pending_lt.get("X_ohm_km")
+                b = pending_lt.get("B_us_km")
+                L = pending_lt.get("length_km")
+                if all(v is not None for v in [kv, r, x, b, L]):
+                    try:
+                        conv = convert_line_params(kv, "per_km", {"R": r, "X": x, "B": b}, L,
+                                                   base_mva=network.get("base_mva", 100.0))
+                        prefilled_line = {
+                            "id": 1,
+                            "from_bus": None,
+                            "to_bus": None,
+                            "circuit": 1,
+                            "r_pct": conv["r_pct"],
+                            "x_pct": conv["x_pct"],
+                            "q_mvar": conv["q_mvar"],
+                            "param_mode": "per_km",
+                            "calc_str": conv["calc_str"],
+                        }
+                        data["net3_prefilled_line"] = prefilled_line
+                        data["net3_lt_prefilled"] = True
+                        buses = network.get("buses", [])
+                        bus_list = ", ".join(str(b["number"]) for b in buses)
+                        net3["field"] = "count"
+                        return (
+                            "✅ Parâmetros da sua LT foram convertidos automaticamente:\n\n"
+                            + conv["calc_str"] + "\n\n"
+                            "---\n\n"
+                            f"Barras disponíveis: **{bus_list}**\n\n"
+                            "**Quantas linhas a rede terá no total?**\n\n"
+                            "(A linha acima já será a Linha 1 — ainda preciso saber de/para qual barra)"
+                        )
+                    except Exception:
+                        pass
+
+            n = _parse_net_int(user_text, 1, 50)
+            if n is None:
+                return "Quantas linhas a rede terá? Informe um número (ex: **1**, **3**):"
+            net3["total"] = n
+            net3["idx"] = 0
+
+            # If a prefilled line exists, start by asking its endpoints
+            prefilled = data.get("net3_prefilled_line")
+            if prefilled:
+                net3["current"] = dict(prefilled)
+                net3["field"] = "from_bus"
+                buses = network.get("buses", [])
+                bus_list = ", ".join(str(b["number"]) for b in buses)
+                return (
+                    f"**Linha 1 de {n} (parâmetros já convertidos da sua LT).**\n\n"
+                    f"Barras disponíveis: **{bus_list}**\n\n"
+                    "Barra **origem** da linha:"
+                )
+            net3["field"] = "from_bus"
+            net3["current"] = {}
+            buses = network.get("buses", [])
+            bus_list = ", ".join(str(b["number"]) for b in buses)
+            return (
+                f"**Linha 1 de {n}.**\n\n"
+                f"Barras disponíveis: **{bus_list}**\n\n"
+                "Barra **origem** (número, ex: **1**):"
+            )
+
+        idx = net3["idx"]
+        current = net3.setdefault("current", {})
+        buses = network.get("buses", [])
+        bus_nums = {b["number"] for b in buses}
+        bus_list = ", ".join(str(b["number"]) for b in buses)
+
+        if field == "from_bus":
+            n = _parse_net_int(user_text, 1, 99999)
+            if n is None or n not in bus_nums:
+                return f"Barra origem deve ser um dos números existentes: **{bus_list}**"
+            current["from_bus"] = n
+            net3["field"] = "to_bus"
+            return f"Barra **destino** da linha (barras disponíveis: **{bus_list}**):"
+
+        if field == "to_bus":
+            n = _parse_net_int(user_text, 1, 99999)
+            if n is None or n not in bus_nums:
+                return f"Barra destino deve ser um dos números existentes: **{bus_list}**"
+            if n == current.get("from_bus"):
+                return "Barra destino deve ser diferente da origem. Informe outro número:"
+            current["to_bus"] = n
+            net3["field"] = "circuit"
+            return "Número do **circuito** (normalmente **1**; use 2, 3 para circuitos paralelos):"
+
+        if field == "circuit":
+            c = _parse_net_int(user_text, 1, 9)
+            if c is None:
+                c_m = re.search(r'\b([1-9])\b', user_text)
+                c = int(c_m.group(1)) if c_m else 1
+            current["circuit"] = c
+            # If this line has pre-filled params (from pending_lt), skip mode/values
+            if current.get("r_pct") is not None:
+                return _net_finalize_line(data, current)
+            net3["field"] = "mode"
+            return (
+                "**Modo de entrada dos parâmetros:**\n\n"
+                "**1** — por km: R(Ω/km), X(Ω/km), B(μS/km) + comprimento\n\n"
+                "**2** — pu: R, X, B em por unidade\n\n"
+                "**3** — %/Mvar: R%, X%, Q em Mvar (direto para DLIN)"
+            )
+
+        if field == "mode":
+            mode = _parse_line_mode(user_text)
+            if mode is None:
+                return "Informe **1** (por km), **2** (pu) ou **3** (%/Mvar):"
+            current["param_mode"] = mode
+            net3["field"] = "values"
+            if mode == "per_km":
+                return (
+                    "Informe R (Ω/km), X (Ω/km), B (μS/km) e comprimento (km).\n\n"
+                    "Exemplo: `R=0.0257 X=0.2995 B=5.4542 L=180`\n"
+                    "ou compacto: `0.0257 0.2995 5.4542 180`"
+                )
+            elif mode == "pu":
+                return (
+                    "Informe R (pu), X (pu) e B (pu) na base do sistema.\n\n"
+                    "Exemplo: `R=0.001 X=0.05 B=0.02`\n"
+                    "ou compacto: `0.001 0.05 0.02`"
+                )
+            else:
+                return (
+                    "Informe R (%), X (%) e Q (Mvar).\n\n"
+                    "Exemplo: `R=0.87 X=10.19 Q=51.93`\n"
+                    "ou compacto: `0.87 10.19 51.93`"
+                )
+
+        if field == "values":
+            mode = current.get("param_mode", "per_km")
+            parsed = _parse_four_floats(user_text)
+            base_mva = network.get("base_mva", 100.0)
+            kv = None
+            bus_map = {b["number"]: b for b in buses}
+            f_bus = current.get("from_bus")
+            if f_bus and f_bus in bus_map:
+                kv = bus_map[f_bus].get("kv", 230.0)
+
+            try:
+                if mode == "per_km":
+                    if isinstance(parsed, dict):
+                        r = parsed.get("r", parsed.get("R"))
+                        x = parsed.get("x", parsed.get("X"))
+                        b = parsed.get("b", parsed.get("B"))
+                        L = parsed.get("l", parsed.get("L", parsed.get("length")))
+                    else:
+                        r, x, b, L = (parsed + [None]*4)[:4]
+                    if None in (r, x, b, L):
+                        return "Não consegui identificar todos os parâmetros. Exemplo: `R=0.0257 X=0.2995 B=5.4542 L=180`"
+                    conv = convert_line_params(kv or 230.0, "per_km", {"R": r, "X": x, "B": b}, L, base_mva)
+                elif mode == "pu":
+                    if isinstance(parsed, dict):
+                        r = parsed.get("r", parsed.get("R"))
+                        x = parsed.get("x", parsed.get("X"))
+                        b = parsed.get("b", parsed.get("B"))
+                    else:
+                        r, x, b = (parsed + [None]*3)[:3]
+                    if None in (r, x, b):
+                        return "Não consegui identificar os parâmetros. Exemplo: `R=0.001 X=0.05 B=0.02`"
+                    conv = convert_line_params(kv or 230.0, "pu", {"R": r, "X": x, "B": b}, base_mva=base_mva)
+                else:
+                    if isinstance(parsed, dict):
+                        r = parsed.get("r", parsed.get("R"))
+                        x = parsed.get("x", parsed.get("X"))
+                        q = parsed.get("q", parsed.get("Q", parsed.get("b", parsed.get("B"))))
+                    else:
+                        r, x, q = (parsed + [None]*3)[:3]
+                    if None in (r, x, q):
+                        return "Não consegui identificar os parâmetros. Exemplo: `R=0.87 X=10.19 Q=51.93`"
+                    conv = convert_line_params(kv or 230.0, "pct", {"R": r, "X": x, "Q": q}, base_mva=base_mva)
+
+                current["r_pct"] = conv["r_pct"]
+                current["x_pct"] = conv["x_pct"]
+                current["q_mvar"] = conv["q_mvar"]
+                current["calc_str"] = conv["calc_str"]
+                return _net_finalize_line(data, current)
+
+            except Exception as exc:
+                return f"Erro na conversão: {exc}. Digite `ajuda` para ver o formato esperado."
+
+        return "Não entendi. Digite `ajuda` para orientação."
+
+    # ── NET4_REVIEW ───────────────────────────────────────────────────────────
+    if step == "NET4_REVIEW":
+        if _net_is_help(user_text):
+            return _net_help("NET4_REVIEW") + "\n\n" + _net_show_review(data)
+
+        t = user_text.strip().lower()
+        network = data.get("network", {})
+
+        # confirmar
+        if any(w in t for w in ["confirmar", "confirma", "ok", "gerar", "continuar", "prosseguir"]):
+            issues = validate_network(network)
+            errors = [i for i in issues if i["severity"] == "error"]
+            if errors:
+                return "❌ Há erros que precisam ser corrigidos antes de gerar o arquivo:\n" + "\n".join(
+                    f"- {e['message']}" for e in errors
+                )
+            # Generate PWF
+            try:
+                pwf_text = build_full_pwf(network)
+                data["net_pwf"] = pwf_text
+                st.session_state.sim_step = "NET5_GENERATE"
+                return (
+                    "✅ Arquivo PWF gerado com sucesso!\n\n"
+                    "Copie o conteúdo abaixo, salve como **minha_rede.pwf** e abra no ANAREDE:\n\n"
+                    f"```\n{pwf_text}\n```\n\n"
+                    "Digite **continuar** quando tiver salvo o arquivo."
+                )
+            except Exception as exc:
+                return f"Erro ao gerar o arquivo: {exc}"
+
+        # editar barra N
+        m = re.search(r'\beditar\s+barra\s+(\d+)\b', t)
+        if m:
+            bus_num = int(m.group(1))
+            buses = network.get("buses", [])
+            bus_map = {b["number"]: b for b in buses}
+            if bus_num not in bus_map:
+                return f"Barra **{bus_num}** não encontrada. Barras existentes: {[b['number'] for b in buses]}"
+            # Remove bus and re-enter NET2 for just this bus (simplified: remove and re-ask)
+            network["buses"] = [b for b in buses if b["number"] != bus_num]
+            # Remove lines that used this bus
+            network["lines"] = [ln for ln in network.get("lines", []) if ln.get("from_bus") != bus_num and ln.get("to_bus") != bus_num]
+            # Re-number line ids
+            for i, ln in enumerate(network["lines"]):
+                ln["id"] = i + 1
+            st.session_state.sim_step = "NET2_BUSES"
+            existing_count = len(network["buses"])
+            data["net2"] = {
+                "total": existing_count + 1,
+                "idx": existing_count,
+                "field": "number",
+                "current": {"number": bus_num},
+            }
+            data["net2"]["current"]["number"] = bus_num
+            data["net2"]["field"] = "name"
+            return (
+                f"Barra **{bus_num}** removida para reedição. "
+                f"As linhas que usavam essa barra também foram removidas.\n\n"
+                f"**Redigitando barra {bus_num}:**\n\nNome da barra (ex: **SE_{bus_num}**):"
+            )
+
+        # editar linha N
+        m = re.search(r'\beditar\s+linha\s+(\d+)\b', t)
+        if m:
+            ln_id = int(m.group(1))
+            lines = network.get("lines", [])
+            if not any(ln["id"] == ln_id for ln in lines):
+                return f"Linha **{ln_id}** não encontrada."
+            network["lines"] = [ln for ln in lines if ln["id"] != ln_id]
+            for i, ln in enumerate(network["lines"]):
+                ln["id"] = i + 1
+            st.session_state.sim_step = "NET3_LINES"
+            remaining = len(network["lines"])
+            data["net3"] = {"total": remaining + 1, "idx": remaining, "field": "from_bus", "current": {}}
+            buses = network.get("buses", [])
+            bus_list = ", ".join(str(b["number"]) for b in buses)
+            return (
+                f"Linha **{ln_id}** removida. Redigitando:\n\n"
+                f"Barras disponíveis: **{bus_list}**\n\nBarra **origem**:"
+            )
+
+        # remover linha N
+        m = re.search(r'\bremover\s+linha\s+(\d+)\b', t)
+        if m:
+            ln_id = int(m.group(1))
+            lines = network.get("lines", [])
+            if not any(ln["id"] == ln_id for ln in lines):
+                return f"Linha **{ln_id}** não encontrada."
+            network["lines"] = [ln for ln in lines if ln["id"] != ln_id]
+            for i, ln in enumerate(network["lines"]):
+                ln["id"] = i + 1
+            return "Linha removida.\n\n" + _net_show_review(data)
+
+        # adicionar barra
+        if "adicionar barra" in t:
+            buses = network.get("buses", [])
+            existing = len(buses)
+            st.session_state.sim_step = "NET2_BUSES"
+            data["net2"] = {"total": existing + 1, "idx": existing, "field": "number", "current": {}}
+            return "Adicionando nova barra.\n\nNúmero da nova barra (1 a 99999):"
+
+        # adicionar linha
+        if "adicionar linha" in t:
+            lines = network.get("lines", [])
+            existing = len(lines)
+            buses = network.get("buses", [])
+            bus_list = ", ".join(str(b["number"]) for b in buses)
+            st.session_state.sim_step = "NET3_LINES"
+            data["net3"] = {"total": existing + 1, "idx": existing, "field": "from_bus", "current": {}}
+            return f"Adicionando nova linha.\n\nBarras disponíveis: **{bus_list}**\n\nBarra **origem**:"
+
+        return _net_show_review(data)
+
+    # ── NET5_GENERATE ─────────────────────────────────────────────────────────
+    if step == "NET5_GENERATE":
+        if _net_is_help(user_text):
+            return _net_help("NET5_GENERATE") + "\n\nDigite **continuar** quando tiver salvo o arquivo."
+        t = user_text.strip().lower()
+        if any(w in t for w in ["continuar", "ok", "salvo", "salvei", "pronto", "sim"]):
+            st.session_state.sim_step = "NET6_RUN"
+            return _net6_prompt(data)
+        # Re-show PWF if asked
+        pwf = data.get("net_pwf", "")
+        return (
+            "O arquivo PWF:\n\n"
+            f"```\n{pwf}\n```\n\n"
+            "Digite **continuar** quando tiver salvo."
+        )
+
+    # ── NET6_RUN ──────────────────────────────────────────────────────────────
+    if step == "NET6_RUN":
+        if _net_is_help(user_text):
+            return _net_help("NET6_RUN") + "\n\nO que aparece no canto superior direito do ANAREDE?"
+
+        # Check convergence from user's report
+        if _is_converged(user_text):
+            data["net7_color"] = "green"
+            st.session_state.sim_step = "NET7_RESULTS"
+            return _net7_converged_prompt(data)
+        if _is_not_converged(user_text):
+            color = "yellow" if "amarelo" in user_text.lower() else "red" if "vermelho" in user_text.lower() else None
+            data["net7_color"] = color or "unknown"
+            st.session_state.sim_step = "NET7_RESULTS"
+            return _net7_not_converged(data)
+
+        return "O que aparece no canto superior direito do ANAREDE após executar o fluxo?"
+
+    # ── NET7_RESULTS ──────────────────────────────────────────────────────────
+    if step == "NET7_RESULTS":
+        if _net_is_help(user_text):
+            return _net_help("NET7_RESULTS")
+
+        t = user_text.strip().lower()
+        color = data.get("net7_color", "unknown")
+
+        # Not yet classified — detect color
+        if color == "unknown":
+            if "vermelho" in t or "divergiu" in t:
+                data["net7_color"] = "red"
+                return _net7_not_converged(data)
+            if "amarelo" in t or "iteraç" in t or "limite" in t:
+                data["net7_color"] = "yellow"
+                return _net7_not_converged(data)
+            if _is_converged(user_text):
+                data["net7_color"] = "green"
+                return _net7_converged_prompt(data)
+            return (
+                "O que aparece no canto superior direito?\n\n"
+                "- **Verde**: convergido\n- **Amarelo**: limite de iterações\n- **Vermelho**: divergiu"
+            )
+
+        if color == "green":
+            # Handle post-results choices
+            if any(w in t for w in ["bess", "inserir bess", "adicionar bess"]):
+                # Transition to BESS flow using this network as base
+                # OPEN QUESTION: exact flow for inserting BESS into a fresh PWF case
+                return (
+                    "**QUESTÃO ABERTA:** A inserção de BESS em um caso gerado do zero "
+                    "(sem SAV base existente) requer confirmação do fluxo no manual do ANAREDE. "
+                    "Por ora, salve o caso como SAV no ANAREDE e use o fluxo BESS normal a partir do SAV.\n\n"
+                    "Deseja encerrar ou continuar com outro cenário?"
+                )
+            if any(w in t for w in ["statcom"]):
+                return (
+                    "**QUESTÃO ABERTA:** Mesmo que o BESS — inserção de STATCOM em caso do zero. "
+                    "Salve como SAV e use o fluxo STATCOM normal.\n\n"
+                    "Deseja encerrar ou continuar?"
+                )
+            if any(w in t for w in ["contingência", "contingencia", "n-1", "n1"]):
+                # Jump to STEP11B contingency flow with NETWORK context
+                st.session_state.sim_step = "STEP11B"
+                return (
+                    "Iniciando análise de contingências N-1.\n\n"
+                    "Quais linhas deseja incluir? Informe no formato:\n"
+                    "- `linha 1-2 circuito 1`\n- `gerador barra 1`"
+                )
+            if any(w in t for w in ["encerrar", "fim", "finalizar", "terminar"]):
+                st.session_state.sim_step = "IDLE"
+                st.session_state.sim_data = {}
+                st.session_state.simulation_mode = False
+                st.session_state.sim_status = None
+                return "Sessão encerrada. O arquivo PWF foi gerado com sucesso. Se precisar de mais ajuda, é só perguntar."
+            return _net7_converged_prompt(data)
+
+        # Not converged — handle edit redirect
+        if any(w in t for w in ["editar", "corrigir", "voltar", "net4", "revisar"]):
+            st.session_state.sim_step = "NET4_REVIEW"
+            return "Voltando à revisão da rede.\n\n" + _net_show_review(data)
+        if any(w in t for w in ["encerrar", "fim", "finalizar"]):
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            st.session_state.simulation_mode = False
+            st.session_state.sim_status = None
+            return "Sessão encerrada."
+
+        return _net7_not_converged(data)
+
+    return None
+
+
+def _net6_prompt(data: dict) -> str:
+    """Return the NET6_RUN prompt explaining how to load the PWF."""
+    # OPEN QUESTION: exact ANAREDE menu path for opening a new PWF file
+    return (
+        "Ótimo! Arquivo salvo.\n\n"
+        "**Para carregar no ANAREDE:**\n\n"
+        "⚠️ **QUESTÃO ABERTA:** O caminho exato de menu para abrir um arquivo PWF novo no ANAREDE "
+        "não foi confirmado pelo manual indexado — não será inventado aqui.\n\n"
+        "Instrução geral baseada no uso típico do ANAREDE:\n"
+        "1. Abra o ANAREDE\n"
+        "2. Procure no menu principal a opção para abrir/carregar um arquivo de rede\n"
+        "3. Selecione o arquivo `.pwf` que você salvou\n"
+        "4. Após carregar, execute o fluxo de potência com **Ctrl+R**\n\n"
+        "O que aparece no canto superior direito do ANAREDE após executar o fluxo?\n\n"
+        "- **Verde**: convergido ✅\n"
+        "- **Amarelo**: limite de iterações — não convergiu\n"
+        "- **Vermelho**: divergiu"
+    )
+
+
+def _net7_converged_prompt(data: dict) -> str:
+    network = data.get("network", {})
+    n_buses = len(network.get("buses", []))
+    n_lines = len(network.get("lines", []))
+    return (
+        "✅ **O caso convergiu!**\n\n"
+        f"Sua rede com **{n_buses} barras** e **{n_lines} linhas** foi calculada com sucesso.\n\n"
+        "**Como interpretar os resultados:**\n"
+        "- Tensões de barra aparecem próximas a cada barra no diagrama (em pu ou kV)\n"
+        "- Fluxos de linha aparecem nas extremidades (MW e Mvar)\n"
+        "- Hachura **VERMELHA**: sobrecarga ou sobretensão\n"
+        "- Hachura **AZUL**: subtensão\n\n"
+        "**Para salvar o caso:** ⚠️ QUESTÃO ABERTA — o procedimento exato para criar um SAV "
+        "a partir deste caso precisa ser confirmado com o manual do ANAREDE.\n\n"
+        "**Próximos passos disponíveis:**\n"
+        "- `inserir BESS` — adicionar bateria ao caso\n"
+        "- `inserir STATCOM` — adicionar compensador reativo\n"
+        "- `contingências` ou `n-1` — análise de contingências\n"
+        "- `encerrar` — finalizar"
+    )
+
+
+def _net7_not_converged(data: dict) -> str:
+    network = data.get("network", {})
+    color = data.get("net7_color", "unknown")
+    checklist = diagnose_nonconvergence(network, color)
+    checklist_str = "\n\n".join(checklist)
+    return (
+        "❌ **O caso não convergiu.**\n\n"
+        "**Diagnóstico para esta rede:**\n\n"
+        + checklist_str
+        + "\n\n---\n\n"
+        "**Opções:**\n"
+        "- `editar rede` — voltar à revisão para corrigir parâmetros\n"
+        "- `encerrar` — finalizar\n\n"
+        "⚠️ *Diagnóstico gerado automaticamente — PENDENTE REVISÃO POR ESPECIALISTA (Thomas).*"
+    )
 
 
 # ── LT implicit-intent detection ──────────────────────────────────────────────
@@ -570,11 +1582,68 @@ def _current_step_question() -> str:
             "1. **Sim** — iniciar simulação guiada\n\n"
             "2. **Não** — só quero uma resposta técnica"
         )
+    if step == "IDLE_LT_NET_CHOICE":
+        return (
+            "Como deseja usar os dados desta linha?\n\n"
+            "**1.** Montar uma rede nova do zero\n\n"
+            "**2.** Inserir BESS/STATCOM em caso PAR/PEL/PDE existente"
+        )
+    if step == "NET1_SETUP":
+        net = data.get("network", {})
+        return (
+            f"Título: **{net.get('title','Meu Caso')}** | Base: **{net.get('base_mva',100)} MVA**\n\n"
+            "Informe novo título e base MVA, ou **confirmar** para manter."
+        )
+    if step == "NET2_BUSES":
+        net2 = data.get("net2", {})
+        field = net2.get("field", "count")
+        total = net2.get("total")
+        idx = net2.get("idx", 0)
+        if field == "count" or total is None:
+            return "**Quantas barras a rede terá?** (mínimo 2, máximo 20)"
+        current = net2.get("current", {})
+        prompts = {
+            "number": f"**Barra {idx+1} de {total}.** Número da barra (1 a 99999):",
+            "name": f"Nome da barra **{current.get('number','')}** (até 12 caracteres):",
+            "kv": f"Tensão nominal de **{current.get('name','')}** em kV:",
+            "tipo": "Tipo: **0** PQ / **1** PV / **2** Referência:",
+            "pg": "Geração ativa em MW:",
+            "v_pu": "Tensão setpoint em pu:",
+            "qmin": "Qmin em Mvar:",
+            "qmax": "Qmax em Mvar:",
+            "pl": "Carga ativa em MW:",
+            "ql": "Carga reativa em Mvar:",
+        }
+        return prompts.get(field, "Continue com os dados da barra.")
+    if step == "NET3_LINES":
+        net3 = data.get("net3", {})
+        field = net3.get("field", "count")
+        total = net3.get("total")
+        idx = net3.get("idx", 0)
+        if field == "count" or total is None:
+            return "**Quantas linhas a rede terá?**"
+        prompts = {
+            "from_bus": f"**Linha {idx+1} de {total}.** Barra **origem**:",
+            "to_bus": "Barra **destino**:",
+            "circuit": "Número do **circuito** (normalmente 1):",
+            "mode": "Modo: **1** por km / **2** pu / **3** %/Mvar:",
+            "values": "Informe os parâmetros:",
+        }
+        return prompts.get(field, "Continue com os dados da linha.")
+    if step == "NET4_REVIEW":
+        return "**Revisão da rede.** Digite `confirmar` para gerar o PWF."
+    if step == "NET5_GENERATE":
+        return "Arquivo gerado. Digite **continuar** quando tiver salvo."
+    if step == "NET6_RUN":
+        return "O que aparece no canto superior direito do ANAREDE?"
+    if step == "NET7_RESULTS":
+        return "O que você observa? Digite `encerrar`, `inserir BESS`, `contingências` ou `editar rede`."
     if step == "STEP1":
         return (
             "**Qual base de dados deseja utilizar?**\n\n"
             "1. **EPE (PDE)**\n\n"
-            "2. **ONS (PAR/PEL)**"
+            "2. **ONS (PAR/PEL)**\n\n"
+            "3. **Minha própria rede** (montar do zero)"
         )
     if step == "STEP2":
         return (
@@ -682,7 +1751,10 @@ def _handle_sim_state(user_text: str) -> str | None:
     # (simulation state is preserved; ↩️ reminder appended by the LLM branch)
     # IDLE_LT_CONFIRM is excluded: it handles free questions internally (abandons
     # the LT confirmation and routes cleanly to the LLM).
-    if step not in ("IDLE", "IDLE_LT_CONFIRM", "STEP12") and _is_free_question(user_text):
+    if (step not in ("IDLE", "IDLE_LT_CONFIRM", "STEP12")
+            and not step.startswith("NET")
+            and not step == "IDLE_LT_NET_CHOICE"
+            and _is_free_question(user_text)):
         return None
 
     # ── Global: encerrar / restart checks (before any step logic) ─────────────
@@ -725,6 +1797,29 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # ── IDLE: check for simulation intent ─────────────────────────────────────
     if step == "IDLE":
+        if _is_network_intent(user_text):
+            if st.session_state.sim_status == "paused":
+                try:
+                    clear_paused_state(st.session_state["session_id"])
+                except Exception:
+                    pass
+            st.session_state.simulation_mode = True
+            st.session_state.sim_status = "active"
+            st.session_state.sim_step = "NET1_SETUP"
+            data["sim_type"] = "NETWORK"
+            data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
+            return (
+                "Ótimo! Vou te guiar para montar uma rede do zero no ANAREDE.\n\n"
+                "Precisarei de:\n"
+                "1. **Título e base MVA** do caso\n"
+                "2. **Dados de cada barra** (número, nome, tensão, tipo, cargas/geração)\n"
+                "3. **Parâmetros de cada linha** (R, X, B — aceito Ω/km, pu ou % diretamente)\n\n"
+                "Ao final, gero o arquivo `.pwf` completo pronto para o ANAREDE.\n\n"
+                "---\n\n"
+                "**Qual o título deste caso e a potência base?**\n\n"
+                "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
+                "Ou apenas pressione **confirmar** para usar os padrões (título: 'Meu Caso', base: 100 MVA)."
+            )
         if _is_simulation_intent(user_text):
             # Clear any paused state when starting fresh
             if st.session_state.sim_status == "paused":
@@ -790,24 +1885,14 @@ def _handle_sim_state(user_text: str) -> str | None:
             lt_summary = _format_lt_params(pending_lt)
             st.session_state.simulation_mode = True
             st.session_state.sim_status = "active"
-            st.session_state.sim_step = "STEP1"
-            data["sim_type"] = "BESS"
-            # Keep pending_lt in sim_data so it is not discarded
+            st.session_state.sim_step = "IDLE_LT_NET_CHOICE"
+            # Keep pending_lt in sim_data
             return (
-                (f"Ótimo! Registrei os parâmetros da sua LT: **{lt_summary}**.\n\n" if lt_summary else "Ótimo!\n\n")
-                + "⚠️ **Nota:** O fluxo atual guia a inserção de BESS/STATCOM no ANAREDE. "
-                "Os parâmetros físicos da LT (R/X em Ω/km, B em μS/km) estão armazenados "
-                "mas a conversão automática para o formato DLIN do ANAREDE "
-                "(R/X em %, susceptância em Mvar) ainda não está implementada neste fluxo — "
-                "não os descartarei.\n\n"
-                "---\n\n"
-                "Vamos começar pelo caso base. Você vai precisar baixar os arquivos da base "
-                "de dados:\n\n"
-                "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos.\n\n"
-                "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos.\n\n"
-                "**Qual base de dados deseja utilizar?**\n\n"
-                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos.\n\n"
-                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos."
+                (f"Ótimo! Parâmetros registrados: **{lt_summary}**.\n\n" if lt_summary else "Ótimo!\n\n")
+                + "Como deseja usar os dados desta linha?\n\n"
+                "**1.** Montar uma rede nova do zero com esta linha já incluída\n\n"
+                "**2.** Inserir BESS/STATCOM em um caso PAR/PEL/PDE existente "
+                "(fluxo com base de dados ONS ou EPE)"
             )
 
         if tl in ("2", "não", "nao", "n", "não") or any(
@@ -827,9 +1912,60 @@ def _handle_sim_state(user_text: str) -> str | None:
             "2. **Não** — só quero uma resposta técnica"
         )
 
+    # ── IDLE_LT_NET_CHOICE: user chose "sim" at IDLE_LT_CONFIRM ──────────────
+    if step == "IDLE_LT_NET_CHOICE":
+        tl = user_text.strip().lower()
+
+        if tl in ("1",) or any(w in tl for w in ["rede", "zero", "nova", "montar", "construir"]):
+            # Option 1 — build new network, pre-fill line from pending_lt
+            pending_lt = data.get("pending_lt", {})
+            st.session_state.sim_step = "NET1_SETUP"
+            data["sim_type"] = "NETWORK"
+            data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
+            lt_summary = _format_lt_params(pending_lt)
+            return (
+                f"Ótimo! A linha (**{lt_summary}**) será automaticamente incluída na rede.\n\n"
+                "Vou precisar que você defina as barras primeiro, e depois a conversão "
+                "dos parâmetros será aplicada na linha.\n\n"
+                "---\n\n"
+                "**Qual o título deste caso e a potência base?**\n\n"
+                "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
+                "Ou **confirmar** para padrões (título: 'Meu Caso', base: 100 MVA)."
+            )
+
+        if tl in ("2",) or any(w in tl for w in ["bess", "statcom", "par", "pel", "pde", "ons", "epe", "existente", "caso existente"]):
+            # Option 2 — current BESS/STATCOM flow
+            st.session_state.sim_step = "STEP1"
+            data["sim_type"] = "BESS"
+            return (
+                "Certo! Seguindo pelo fluxo de inserção em caso existente.\n\n"
+                "Os parâmetros da LT ficam registrados para referência.\n\n"
+                "---\n\n"
+                "**Qual base de dados deseja utilizar?**\n\n"
+                "1. **EPE (PDE)** — planejamento de expansão, horizonte de ~10 anos.\n\n"
+                "2. **ONS (PAR/PEL)** — planejamento operacional, horizonte de ~5 anos."
+            )
+
+        return (
+            "Não entendi. Por favor, escolha:\n\n"
+            "**1** — Montar uma rede nova do zero\n\n"
+            "**2** — Inserir BESS/STATCOM em caso PAR/PEL/PDE existente"
+        )
+
     # ── STEP 1: waiting for EPE/ONS choice ────────────────────────────────────
     if step == "STEP1":
         t = user_text.strip().lower()
+        if t == "3" or any(w in t for w in ["rede", "zero", "própria", "propria", "montar"]):
+            # Option 3 — build from scratch
+            st.session_state.sim_step = "NET1_SETUP"
+            data["sim_type"] = "NETWORK"
+            data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
+            return (
+                "Ótimo! Vou te guiar para montar uma rede do zero.\n\n"
+                "**Qual o título deste caso e a potência base?**\n\n"
+                "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
+                "Ou **confirmar** para padrões (título: 'Meu Caso', base: 100 MVA)."
+            )
         if t == "1" or any(w in t for w in ["epe", "pde", "expansão", "expansao", "longo prazo"]):
             data["db"] = "EPE"
             label = "PDE (EPE)"
@@ -838,8 +1974,9 @@ def _handle_sim_state(user_text: str) -> str | None:
             label = "PAR/PEL (ONS)"
         else:
             return (
-                "Não identifiquei a escolha. Por favor, responda com **1** (EPE/PDE) "
-                "ou **2** (ONS/PAR/PEL)."
+                "Não identifiquei a escolha. Por favor, responda com:\n\n"
+                "**1** — EPE (PDE)\n\n**2** — ONS (PAR/PEL)\n\n"
+                "**3** — Minha própria rede (montar do zero)"
             )
         st.session_state.sim_step = "STEP2"
         return (
@@ -1740,6 +2877,10 @@ def _handle_sim_state(user_text: str) -> str | None:
             "Confirme quando o caso estiver salvo."
         )
 
+    # ── NET states: build-from-scratch guided flow ────────────────────────────
+    if step.startswith("NET"):
+        return _handle_net_state(user_text)
+
     return None  # fallback to LLM
 
 
@@ -1770,6 +2911,14 @@ with st.sidebar:
     _step_labels = {
         "IDLE":             "",
         "IDLE_LT_CONFIRM":  "Confirmação: dados de LT detectados",
+        "IDLE_LT_NET_CHOICE": "Escolha: rede nova ou caso existente",
+        "NET1_SETUP":   "NET 1: Título e base MVA",
+        "NET2_BUSES":   "NET 2: Barras",
+        "NET3_LINES":   "NET 3: Linhas",
+        "NET4_REVIEW":  "NET 4: Revisão",
+        "NET5_GENERATE": "NET 5: Arquivo PWF",
+        "NET6_RUN":     "NET 6: Carregar no ANAREDE",
+        "NET7_RESULTS": "NET 7: Resultados",
         "STEP1":  "STEP 1: Base de dados",
         "STEP2":  "STEP 2: Ano(s)",
         "STEP3":  "STEP 3: Cenário",
@@ -1868,7 +3017,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v6.1")
+    st.caption("v6.3.0")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -1993,6 +3142,13 @@ if prompt:
             sim_context_note = ""
             if active_step not in ("IDLE", "STEP12") and st.session_state.sim_status == "active":
                 _nudge_labels = {
+                    "NET1_SETUP":   "título e base MVA",
+                    "NET2_BUSES":   "dados das barras",
+                    "NET3_LINES":   "dados das linhas",
+                    "NET4_REVIEW":  "revisão da rede",
+                    "NET5_GENERATE": "arquivo PWF gerado",
+                    "NET6_RUN":     "resultado do fluxo",
+                    "NET7_RESULTS": "resultados da simulação",
                     "STEP1": "base de dados",
                     "STEP2": "ano(s)",
                     "STEP3": "cenário de carga",
