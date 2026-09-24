@@ -887,7 +887,15 @@ def _handle_net_state(user_text: str):
 
         # Phase 1: get bus count
         if field == "count" or total is None:
-            n = _parse_net_int(user_text, 2, 20)
+            # Require a BARE integer here — never extract a leading digit from a
+            # richer message (e.g. a full compact bus record like
+            # "2, Barra B, 230 kV, PV, 150 MW, V=1.01"), which must be rejected.
+            m = re.fullmatch(r'\s*(\d+)\s*', user_text)
+            n = None
+            if m:
+                val = int(m.group(1))
+                if 2 <= val <= 20:
+                    n = val
             if n is None:
                 return "Quantas barras a rede terá? Informe um número entre **2** e **20**."
             net2["total"] = n

@@ -987,6 +987,41 @@ check("other-bus response clarifies (mentions outra barra)",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 18 — bus-count question requires a BARE integer (no leading-digit grab)
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n═══ Section 18: bus-count requires bare integer ═══\n")
+
+# A full compact bus record at the count question must be REJECTED and re-asked,
+# not have its leading "2" silently extracted as the bus count.
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": None, "idx": 0, "field": "count", "current": {}},
+})
+resp_cnt = _handle_sim_state("2, Barra B, 230 kV, PV, 150 MW, V=1.01")
+check("compact record at count question does NOT set total",
+      _ss["sim_data"]["net2"]["total"] is None, f"total={_ss['sim_data']['net2']['total']}")
+check("compact record at count question stays in count field",
+      _ss["sim_data"]["net2"]["field"] == "count", f"field={_ss['sim_data']['net2']['field']}")
+check("compact record at count question re-asks (número entre 2 e 20)",
+      resp_cnt and "número entre" in resp_cnt.lower(),
+      f"resp={resp_cnt[:160] if resp_cnt else None}")
+
+# A bare integer (optionally padded with whitespace) is still accepted.
+reset_idle()
+set_active("NET2_BUSES", {
+    "sim_type": "NETWORK",
+    "network": {"title": "T", "base_mva": 100.0, "buses": [], "lines": []},
+    "net2": {"total": None, "idx": 0, "field": "count", "current": {}},
+})
+resp_ok = _handle_sim_state(" 3 ")
+check("padded bare integer accepted as count",
+      _ss["sim_data"]["net2"]["total"] == 3 and _ss["sim_data"]["net2"]["field"] == "number",
+      f"total={_ss['sim_data']['net2']['total']}, field={_ss['sim_data']['net2']['field']}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "═" * 60)
