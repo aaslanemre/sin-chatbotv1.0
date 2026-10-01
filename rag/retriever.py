@@ -23,13 +23,16 @@ def get_embeddings():
         )
 
 
-def get_retriever():
+def get_vectorstore():
     embeddings = get_embeddings()
-    vectorstore = QdrantVectorStore.from_existing_collection(
+    return QdrantVectorStore.from_existing_collection(
         embedding=embeddings,
         url=f"http://{QDRANT_HOST}:{QDRANT_PORT}",
         collection_name=QDRANT_COLLECTION,
     )
-    return vectorstore.as_retriever(
+
+
+def get_retriever():
+    return get_vectorstore().as_retriever(
         search_kwargs={"k": TOP_K},
     )

@@ -1,3 +1,7 @@
+# ⚠️  BRANCH v7.0-grounding-demo — DEMO ONLY.
+# Do not deploy this branch to the production VM without explicit
+# review of threshold values and false-positive rate on real
+# usage data.
 import hashlib
 import importlib
 import re
@@ -22,12 +26,65 @@ from auth.auth_service import (
     save_paused_state, load_paused_state, clear_paused_state,
 )
 
+from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
+
 st.set_page_config(
-    page_title="Assistente SIN v6.3.0",
+    page_title="Assistente SIN v7.0-demo",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
 )
+
+# ── Grounding confidence (v7.0 demo) ──────────────────────────────────────────
+def _classify_grounding(retrieval_scores: list) -> str:
+    """Return 'green', 'yellow', or 'red' based on top-1 cosine score."""
+    if not retrieval_scores:
+        return "red"
+    top = retrieval_scores[0]["score"]
+    if top >= GROUNDING_THRESHOLD:
+        return "green"
+    if top >= GROUNDING_THRESHOLD_LOW:
+        return "yellow"
+    return "red"
+
+
+_BADGE_LABELS = {
+    "green":  "🟢 Grounded",
+    "yellow": "🟡 Parcialmente fundamentado",
+    "red":    "🔴 Sem base documental",
+}
+
+_DISCLOSURE = (
+    "Não encontrei essa informação específica nos documentos — "
+    "respondendo com base em conhecimento geral de sistemas de "
+    "potência:"
+)
+
+
+def _render_badge(confidence: str):
+    st.caption(_BADGE_LABELS[confidence])
+
+
+def _render_sources_panel(retrieval_scores: list, confidence: str):
+    import os as _os
+    with st.expander("📄 Fontes consultadas"):
+        if confidence == "red":
+            if retrieval_scores:
+                best = retrieval_scores[0]
+                src = _os.path.basename(best["source"]) if "/" in best["source"] else best["source"]
+                st.caption(
+                    f"Nenhum documento com relevância suficiente foi "
+                    f"encontrado. Melhor resultado: **{src}** — "
+                    f"{best['score']:.2f} (abaixo do limite de "
+                    f"{GROUNDING_THRESHOLD:.2f})"
+                )
+            else:
+                st.caption("Nenhum documento foi recuperado.")
+        else:
+            for item in retrieval_scores:
+                src = _os.path.basename(item["source"]) if "/" in item["source"] else item["source"]
+                st.caption(f"• {src}  —  {item['score']:.2f}")
+
 
 # ── Initialize database tables ────────────────────────────────────────────────
 if "db_initialized" not in st.session_state:
@@ -3291,7 +3348,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v6.3.0")
+    st.caption("v7.0-grounding-demo (DEMO ONLY)")
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -3313,8 +3370,12 @@ if st.session_state.chain_error:
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
+        if msg.get("confidence"):
+            _render_badge(msg["confidence"])
         st.markdown(msg["content"])
-        if "sources" in msg and msg["sources"]:
+        if msg.get("confidence") and "retrieval_scores" in msg:
+            _render_sources_panel(msg["retrieval_scores"], msg["confidence"])
+        elif "sources" in msg and msg["sources"]:
             with st.expander("📄 Fontes consultadas"):
                 for src in msg["sources"]:
                     st.caption(f"• {src}")
@@ -3388,6 +3449,8 @@ if prompt:
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
 
+    confidence = None
+    retrieval_scores = None
     with st.chat_message("assistant"):
         if sim_response is not None:
             # Deterministic simulation guide response
@@ -3450,6 +3513,10 @@ if prompt:
                         "study_context": study_context,
                     })
                     answer = result["answer"] + sim_context_note
+                    retrieval_scores = result.get("retrieval_scores") or []
+                    confidence = _classify_grounding(retrieval_scores)
+                    if confidence == "red":
+                        answer = f"{_DISCLOSURE}\n\n{answer}"
                     sources = list({
                         doc.metadata.get("source", "desconhecido")
                         for doc in result.get("source_documents", [])
@@ -3460,18 +3527,28 @@ if prompt:
                         "Verifique se o Qdrant e o Ollama estão acessíveis."
                     ) + sim_context_note
                     sources = []
+                    confidence = None
+                    retrieval_scores = None
 
+            if confidence:
+                _render_badge(confidence)
             st.markdown(answer)
-            if sources:
+            if confidence:
+                _render_sources_panel(retrieval_scores, confidence)
+            elif sources:
                 with st.expander("📄 Fontes consultadas"):
                     for src in sources:
                         st.caption(f"• {src}")
 
-    st.session_state.messages.append({
+    _msg = {
         "role": "assistant",
         "content": answer,
         "sources": sources,
-    })
+    }
+    if confidence:
+        _msg["confidence"] = confidence
+        _msg["retrieval_scores"] = retrieval_scores
+    st.session_state.messages.append(_msg)
 
     # Log assistant message
     try:

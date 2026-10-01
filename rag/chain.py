@@ -1,6 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from rag.retriever import get_retriever
+from rag.retriever import get_vectorstore
+from config.settings import TOP_K
 from prompts.system_prompt import SYSTEM_PROMPT
 from config.settings import (
     LLM_PROVIDER,
@@ -34,12 +35,13 @@ class SINChain:
     Simulation intent and context handling logic lives in the system prompt.
 
     Interface: chain.invoke({"question": ..., "study_context": ...})
-               → {"answer": ..., "source_documents": [...]}
+               → {"answer": ..., "source_documents": [...],
+                  "retrieval_scores": [{"source": ..., "score": ...}, ...]}
     """
 
     def __init__(self):
         self.llm = get_llm()
-        self.retriever = get_retriever()
+        self.vectorstore = get_vectorstore()
         self.chat_history: list = []
 
         self._prompt = ChatPromptTemplate.from_messages([
@@ -52,7 +54,13 @@ class SINChain:
         question = inputs["question"]
         study_context = inputs.get("study_context", "No study context defined yet.")
 
-        docs = self.retriever.invoke(question)
+        # Same similarity search as as_retriever(k=TOP_K), but keeps the scores.
+        scored = self.vectorstore.similarity_search_with_score(question, k=TOP_K)
+        docs = [doc for doc, _ in scored]
+        retrieval_scores = [
+            {"source": doc.metadata.get("source", "desconhecido"), "score": float(score)}
+            for doc, score in scored
+        ]
         context = "\n\n".join(doc.page_content for doc in docs)
 
         messages = self._prompt.format_messages(
@@ -74,6 +82,7 @@ class SINChain:
         return {
             "answer": answer,
             "source_documents": docs,
+            "retrieval_scores": retrieval_scores,
         }
 
 

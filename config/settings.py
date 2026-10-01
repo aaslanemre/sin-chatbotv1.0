@@ -32,6 +32,10 @@ CHUNK_OVERLAP      = 100
 TOP_K              = 5
 SIMILARITY_THRESHOLD = 0.45
 
+# Grounding confidence (v7.0 demo) — top-1 cosine score bands
+GROUNDING_THRESHOLD     = float(os.getenv("GROUNDING_THRESHOLD", "0.45"))      # >= → green
+GROUNDING_THRESHOLD_LOW = float(os.getenv("GROUNDING_THRESHOLD_LOW", "0.30"))  # >= but < THRESHOLD → yellow; below → red
+
 # Paths
 INCOMING_DOCS_DIR  = os.getenv("INCOMING_DOCS_DIR", "docs/incoming")
 PROCESSED_DOCS_DIR = os.getenv("PROCESSED_DOCS_DIR", "docs/processed")
