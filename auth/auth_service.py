@@ -3,6 +3,7 @@ import os
 import bcrypt
 from datetime import datetime
 from auth.db import get_connection, get_cursor
+from agents.session_analysis import FEEDBACK_STATUSES
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -139,6 +140,7 @@ def delete_user(user_id: str) -> bool:
     conn = get_connection()
     cur = conn.cursor()
     try:
+        cur.execute("DELETE FROM feedback WHERE user_id = %s::uuid", (user_id,))
         cur.execute("DELETE FROM chat_logs WHERE user_id = %s::uuid", (user_id,))
         cur.execute("DELETE FROM sessions WHERE user_id = %s::uuid", (user_id,))
         cur.execute("DELETE FROM documents WHERE uploaded_by = %s::uuid", (user_id,))
@@ -192,14 +194,16 @@ def manually_verify_user(user_id: str) -> bool:
 
 # ── Chat logging ─────────────────────────────────────────────────────────────
 
-def log_chat_message(user_id: str, session_id: str, role: str, message: str, sim_step: str = None):
+def log_chat_message(user_id: str, session_id: str, role: str, message: str,
+                     sim_step: str = None, message_id: str = None, sim_type: str = None):
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(
-            """INSERT INTO chat_logs (user_id, session_id, role, message, sim_step)
-               VALUES (%s::uuid, %s::uuid, %s, %s, %s)""",
-            (user_id, session_id, role, message, sim_step),
+            """INSERT INTO chat_logs (user_id, session_id, role, message, sim_step,
+                                      message_id, sim_type)
+               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s)""",
+            (user_id, session_id, role, message, sim_step, message_id, sim_type),
         )
         conn.commit()
     finally:
@@ -213,7 +217,8 @@ def get_chat_logs(start_date=None, end_date=None, user_id=None) -> list[dict]:
     try:
         query = """
             SELECT cl.id, cl.user_id, u.email, u.full_name, cl.session_id,
-                   cl.role, cl.message, cl.sim_step, cl.created_at
+                   cl.role, cl.message, cl.sim_step, cl.message_id, cl.sim_type,
+                   cl.created_at
             FROM chat_logs cl
             JOIN users u ON cl.user_id = u.id
             WHERE 1=1
@@ -230,6 +235,32 @@ def get_chat_logs(start_date=None, end_date=None, user_id=None) -> list[dict]:
             params.append(user_id)
         query += " ORDER BY cl.created_at"
         cur.execute(query, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            r["id"] = str(r["id"])
+            r["user_id"] = str(r["user_id"])
+            r["session_id"] = str(r["session_id"])
+        return rows
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_chat_logs_for_sessions(session_ids: list) -> list[dict]:
+    """All chat_logs rows (ordered) for the given sessions, regardless of date."""
+    if not session_ids:
+        return []
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """SELECT cl.id, cl.user_id, cl.session_id, cl.role, cl.message,
+                      cl.sim_step, cl.message_id, cl.sim_type, cl.created_at
+               FROM chat_logs cl
+               WHERE cl.session_id = ANY(%s::uuid[])
+               ORDER BY cl.created_at""",
+            ([str(x) for x in session_ids],),
+        )
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:
             r["id"] = str(r["id"])
@@ -308,7 +339,11 @@ def list_sessions(user_id=None, start_date=None, end_date=None,
         query = """
             SELECT s.id, s.user_id, u.email, u.full_name,
                    s.started_at, s.last_message_at, s.message_count,
-                   s.sim_type, s.final_sim_step, s.flagged, s.flag_note
+                   s.sim_type, s.final_sim_step, s.flagged, s.flag_note,
+                   (s.paused_state IS NOT NULL) AS is_paused,
+                   (SELECT COUNT(*) FROM feedback f WHERE f.session_id = s.id) AS feedback_count,
+                   (SELECT COUNT(*) FROM feedback f
+                     WHERE f.session_id = s.id AND f.rating = 'down') AS thumbs_down_count
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE 1=1
@@ -423,6 +458,162 @@ def clear_paused_state(session_id: str):
             (session_id,),
         )
         conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Feedback ─────────────────────────────────────────────────────────────────
+
+
+
+def _feedback_rows(cur) -> list[dict]:
+    rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        for k in ("id", "user_id", "session_id"):
+            if r.get(k) is not None:
+                r[k] = str(r[k])
+    return rows
+
+
+def submit_feedback(user_id, session_id, message_id, rating, category, comment,
+                    assistant_message, user_message, sim_type,
+                    sim_step_before, sim_step_after, app_version):
+    """Upsert feedback for (user, message). Resubmitting updates the row and keeps its status."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO feedback
+                   (user_id, session_id, message_id, rating, category, comment,
+                    assistant_message, user_message, sim_type,
+                    sim_step_before, sim_step_after, app_version)
+               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (user_id, message_id) DO UPDATE SET
+                   rating = EXCLUDED.rating,
+                   category = EXCLUDED.category,
+                   comment = EXCLUDED.comment,
+                   updated_at = now()""",
+            (user_id, session_id, message_id, rating, category, comment,
+             assistant_message, user_message, sim_type,
+             sim_step_before, sim_step_after, app_version),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_feedback_for_session(user_id: str, session_id: str) -> dict:
+    """Feedback by this user in this session, keyed by message_id."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """SELECT * FROM feedback
+               WHERE user_id = %s::uuid AND session_id = %s::uuid""",
+            (user_id, session_id),
+        )
+        return {r["message_id"]: r for r in _feedback_rows(cur)}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_session_feedback(session_id: str) -> list[dict]:
+    """All feedback for one session (admin use), oldest first."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            "SELECT * FROM feedback WHERE session_id = %s::uuid ORDER BY created_at",
+            (session_id,),
+        )
+        return _feedback_rows(cur)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def list_feedback(status=None, category=None, sim_type=None, sim_step=None,
+                  app_version=None, rating=None, user=None,
+                  start_date=None, end_date=None) -> list[dict]:
+    """Filtered feedback joined with the user (admin only). `user` is a user id."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        query = """
+            SELECT f.*, u.email, u.full_name
+            FROM feedback f
+            LEFT JOIN users u ON f.user_id = u.id
+            WHERE 1=1
+        """
+        params = []
+        if sim_type == "Conversa livre":
+            query += " AND f.sim_type IS NULL"
+            sim_type = None
+        for col, val in (("status", status), ("category", category),
+                         ("sim_type", sim_type), ("app_version", app_version),
+                         ("rating", rating)):
+            if val:
+                query += f" AND f.{col} = %s"
+                params.append(val)
+        if sim_step:
+            query += " AND (f.sim_step_before = %s OR f.sim_step_after = %s)"
+            params += [sim_step, sim_step]
+        if user:
+            query += " AND f.user_id = %s::uuid"
+            params.append(user)
+        if start_date:
+            query += " AND f.created_at >= %s"
+            params.append(start_date)
+        if end_date:
+            query += " AND f.created_at < %s"
+            params.append(end_date)
+        query += " ORDER BY f.created_at DESC"
+        cur.execute(query, params)
+        return _feedback_rows(cur)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_feedback_status(feedback_id: str, status: str, admin_note: str = None):
+    if status not in FEEDBACK_STATUSES:
+        raise ValueError(f"status invalido: {status}")
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """UPDATE feedback SET status = %s, admin_note = %s, updated_at = now()
+               WHERE id = %s::uuid""",
+            (status, admin_note, feedback_id),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def feedback_stats() -> dict:
+    """Counts by step, category, status, rating and version."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        out = {}
+        for key, expr in (
+            ("by_step", "COALESCE(sim_type, 'Livre') || ' / ' || COALESCE(sim_step_after, '-')"),
+            ("by_category", "COALESCE(category, '-')"),
+            ("by_status", "status"),
+            ("by_rating", "rating"),
+            ("by_version", "COALESCE(app_version, '-')"),
+        ):
+            cur.execute(f"SELECT {expr} AS k, COUNT(*) AS n FROM feedback GROUP BY 1 ORDER BY n DESC")
+            out[key] = {r["k"]: r["n"] for r in cur.fetchall()}
+        return out
     finally:
         cur.close()
         conn.close()

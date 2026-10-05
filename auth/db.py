@@ -98,6 +98,31 @@ def init_db():
         EXCEPTION WHEN duplicate_column THEN NULL;
         END $$;
     """)
+    # v6.4.0 — additive only: link chat rows to messages and record sim type
+    cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS message_id TEXT;")
+    cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS sim_type TEXT;")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS feedback (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID REFERENCES users(id),
+            session_id UUID,
+            message_id TEXT,
+            rating TEXT,                 -- 'up' | 'down'
+            category TEXT,               -- tecnico | passo | faltou | formato | outro
+            comment TEXT,
+            assistant_message TEXT,      -- snapshot
+            user_message TEXT,           -- snapshot of the triggering message
+            sim_type TEXT,               -- BESS | STATCOM | NETWORK | NULL
+            sim_step_before TEXT,
+            sim_step_after TEXT,
+            app_version TEXT,
+            status TEXT DEFAULT 'novo',  -- novo | em_analise | resolvido | descartado
+            admin_note TEXT,
+            created_at TIMESTAMP DEFAULT now(),
+            updated_at TIMESTAMP DEFAULT now(),
+            UNIQUE (user_id, message_id)
+        );
+    """)
     conn.commit()
     cur.close()
     conn.close()

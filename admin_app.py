@@ -7,6 +7,7 @@
 import streamlit as st
 from auth.db import init_db
 from auth.auth_service import signup_admin, login
+from config.version import APP_VERSION
 
 st.set_page_config(
     page_title="Admin — Assistente SIN",
@@ -80,7 +81,7 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
     st.divider()
-    st.caption("v6.3.0")
+    st.caption(APP_VERSION)
 
 # ── Render admin panel ───────────────────────────────────────────────────────
 from admin.panel import render_admin_panel

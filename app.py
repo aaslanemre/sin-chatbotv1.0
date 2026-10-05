@@ -16,6 +16,8 @@ from agents.network_builder import (
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
+from config.version import APP_VERSION
+from agents.session_analysis import FEEDBACK_CATEGORIES
 from auth.auth_service import (
     signup, login,
     log_chat_message, create_session, update_session,
@@ -23,7 +25,7 @@ from auth.auth_service import (
 )
 
 st.set_page_config(
-    page_title="Assistente SIN v6.3.0",
+    page_title=f"Assistente SIN {APP_VERSION}",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="expanded",
@@ -116,6 +118,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
+            "welcome": True,   # no message_id / no feedback widget
             "content": (
                 "Olá! Sou seu assistente especialista no Sistema Interligado Nacional.\n\n"
                 "Você pode me fazer perguntas técnicas sobre o SIN, BESS, STATCOM, "
@@ -144,6 +147,148 @@ if "sim_data" not in st.session_state:
 if "sim_status" not in st.session_state:
     st.session_state.sim_status = None   # None | "active" | "paused"
 
+# ── Message ids, logging and tester feedback (v6.4.0) ─────────────────────────
+
+def _new_message_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _sim_snapshot() -> tuple:
+    """(sim_step, sim_type) currently active — read-only."""
+    return (
+        st.session_state.get("sim_step"),
+        (st.session_state.get("sim_data") or {}).get("sim_type"),
+    )
+
+
+def _make_assistant_message(content, *, sources=None, user_message=None,
+                            step_before=None, type_before=None) -> dict:
+    """Assistant message dict with a stable id and the sim context for feedback/analysis."""
+    step_after, type_after = _sim_snapshot()
+    msg = {
+        "role": "assistant",
+        "content": content,
+        "message_id": _new_message_id(),
+        "sim_type": type_after or type_before,
+        "sim_step_before": step_before if step_before is not None else step_after,
+        "sim_step_after": step_after,
+        "user_message": user_message,
+    }
+    if sources is not None:
+        msg["sources"] = sources
+    return msg
+
+
+def _log_message(msg: dict, step=None, sim_type=None):
+    """Write a message to chat_logs with its id. Never raises (chat must keep working)."""
+    try:
+        log_chat_message(
+            st.session_state["user"]["id"],
+            st.session_state["session_id"],
+            msg["role"], msg["content"],
+            step if step is not None else msg.get("sim_step_after"),
+            message_id=msg.get("message_id"),
+            sim_type=sim_type if sim_type is not None else msg.get("sim_type"),
+        )
+    except Exception:
+        pass
+
+
+def _append_system_assistant_message(content):
+    """Assistant message produced outside the chat pipeline (sidebar buttons, resume)."""
+    step, stype = _sim_snapshot()
+    msg = _make_assistant_message(content, step_before=step, type_before=stype)
+    st.session_state.messages.append(msg)
+    _log_message(msg)
+    return msg
+
+
+def _feedback_cache() -> dict:
+    """This user's feedback for the current session, keyed by message_id (loaded once)."""
+    sid = st.session_state.get("session_id")
+    if st.session_state.get("_feedback_cache_sid") != sid:
+        st.session_state["_feedback_cache_sid"] = sid
+        try:
+            from auth.auth_service import get_user_feedback_for_session
+            st.session_state["_feedback_cache"] = get_user_feedback_for_session(
+                st.session_state["user"]["id"], sid) or {}
+        except Exception:
+            st.session_state["_feedback_cache"] = {}
+    return st.session_state["_feedback_cache"]
+
+
+def _submit_feedback_for(msg: dict, rating: str, category, comment: str) -> bool:
+    """Persist feedback. Touches NO simulation state. Returns True on success."""
+    try:
+        from auth.auth_service import submit_feedback
+        submit_feedback(
+            st.session_state["user"]["id"], st.session_state["session_id"],
+            msg["message_id"], rating, category, comment,
+            msg.get("content"), msg.get("user_message"), msg.get("sim_type"),
+            msg.get("sim_step_before"), msg.get("sim_step_after"), APP_VERSION,
+        )
+    except Exception:
+        return False
+    _feedback_cache()[msg["message_id"]] = {
+        "rating": rating, "category": category, "comment": comment,
+    }
+    return True
+
+
+def _render_feedback_widget(msg: dict):
+    """Compact '💬 Deixar feedback' popover under an assistant message."""
+    if msg.get("role") != "assistant" or msg.get("welcome"):
+        return
+    if not msg.get("message_id"):
+        msg["message_id"] = _new_message_id()
+    mid = msg["message_id"]
+    existing = _feedback_cache().get(mid)
+
+    _ratings = {"👍": "up", "👎": "down"}
+    _cat_keys = [None] + list(FEEDBACK_CATEGORIES)
+    with st.popover("💬 Deixar feedback"):
+        with st.form(key=f"fb_form_{mid}"):
+            _icons = list(_ratings)
+            _idx = None
+            if existing and existing.get("rating") in _ratings.values():
+                _idx = 0 if existing["rating"] == "up" else 1
+            choice = st.radio("Avaliação", _icons, index=_idx, horizontal=True,
+                              key=f"fb_rating_{mid}")
+            _cidx = _cat_keys.index(existing["category"]) if (
+                existing and existing.get("category") in _cat_keys) else 0
+            category = st.selectbox(
+                "Categoria (opcional para 👍)", _cat_keys, index=_cidx,
+                format_func=lambda k: "—" if k is None else FEEDBACK_CATEGORIES[k],
+                key=f"fb_cat_{mid}",
+            )
+            comment = st.text_area(
+                "Comentário", value=(existing or {}).get("comment") or "",
+                key=f"fb_comment_{mid}",
+            )
+            sent = st.form_submit_button("Enviar")
+
+    if sent:
+        if choice not in _ratings:
+            st.toast("Escolha 👍 ou 👎 antes de enviar.")
+        elif _submit_feedback_for(msg, _ratings[choice], category, (comment or "").strip()):
+            st.toast("Obrigado pelo feedback!")
+        else:
+            st.toast("Não foi possível enviar o feedback agora. Tente novamente em instantes.")
+    if mid in _feedback_cache():
+        st.caption("✅ Feedback enviado")
+
+
+def _render_message(msg: dict):
+    """Render one history message (+ sources and feedback widget for assistant)."""
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if "sources" in msg and msg["sources"]:
+            with st.expander("📄 Fontes consultadas"):
+                for src in msg["sources"]:
+                    st.caption(f"• {src}")
+        _render_feedback_widget(msg)
+
+
 # ── Auto-resume paused simulation on login ────────────────────────────────────
 if "_pending_resume" in st.session_state:
     _pr = st.session_state.pop("_pending_resume")
@@ -154,14 +299,11 @@ if "_pending_resume" in st.session_state:
     clear_paused_state(_pr["session_id"])
     _step_label = _pr["sim_step"]
     _sim_type = _pr["sim_data"].get("sim_type", "BESS")
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": (
-            f"Bem-vindo de volta! Encontrei uma simulação pausada ({_sim_type}, etapa {_step_label}).\n\n"
-            "A simulação foi retomada automaticamente. Continue de onde parou, "
-            "ou digite **encerrar** para finalizar."
-        ),
-    })
+    _append_system_assistant_message(
+        f"Bem-vindo de volta! Encontrei uma simulação pausada ({_sim_type}, etapa {_step_label}).\n\n"
+        "A simulação foi retomada automaticamente. Continue de onde parou, "
+        "ou digite **encerrar** para finalizar."
+    )
 
 
 # ── Simulation state machine helpers ──────────────────────────────────────────
@@ -3223,10 +3365,7 @@ with st.sidebar:
                     pass
                 last_q = _current_step_question()
                 if last_q:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"Simulação retomada.\n\n{last_q}",
-                    })
+                    _append_system_assistant_message(f"Simulação retomada.\n\n{last_q}")
                 st.rerun()
         with col_end:
             if st.button("⏹️ Encerrar", use_container_width=True):
@@ -3238,10 +3377,7 @@ with st.sidebar:
                     clear_paused_state(st.session_state["session_id"])
                 except Exception:
                     pass
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Simulação encerrada.",
-                })
+                _append_system_assistant_message("Simulação encerrada.")
                 st.rerun()
     elif st.session_state.sim_status == "active":
         step_label = _step_labels.get(st.session_state.sim_step, "")
@@ -3257,14 +3393,11 @@ with st.sidebar:
                 )
             except Exception:
                 pass
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": (
-                    "Simulação pausada. Você pode fazer perguntas livres.\n\n"
-                    "Use o botão **▶️ Retomar** na barra lateral ou digite "
-                    "**retomar** para voltar à simulação."
-                ),
-            })
+            _append_system_assistant_message(
+                "Simulação pausada. Você pode fazer perguntas livres.\n\n"
+                "Use o botão **▶️ Retomar** na barra lateral ou digite "
+                "**retomar** para voltar à simulação."
+            )
             st.rerun()
     else:
         st.info("💬 Modo: Conversa Livre")
@@ -3291,7 +3424,7 @@ with st.sidebar:
         "💡 O processo de simulação é conduzido inteiramente "
         "pelo chat. Não é necessário fazer upload de arquivos."
     )
-    st.caption("v6.3.0")
+    st.caption(APP_VERSION)
 
 # ── Main area ──────────────────────────────────────────────────────────────────
 st.markdown("### ⚡ Assistente SIN")
@@ -3312,28 +3445,21 @@ if st.session_state.chain_error:
         st.rerun()
 
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if "sources" in msg and msg["sources"]:
-            with st.expander("📄 Fontes consultadas"):
-                for src in msg["sources"]:
-                    st.caption(f"• {src}")
+    _render_message(msg)
 
 prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
 
 if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Sim context when the user message ARRIVED (before any state change)
+    _step_before, _type_before = _sim_snapshot()
+    _user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
+    st.session_state.messages.append(_user_msg)
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Log user message + update session
+    # Log user message (sim_step = step active on arrival) + update session
+    _log_message(_user_msg, step=_step_before, sim_type=_type_before)
     try:
-        log_chat_message(
-            st.session_state["user"]["id"],
-            st.session_state["session_id"],
-            "user", prompt,
-            st.session_state.get("sim_step"),
-        )
         update_session(
             st.session_state["session_id"],
             sim_type=st.session_state.sim_data.get("sim_type"),
@@ -3358,18 +3484,14 @@ if prompt:
         _resume_msg = "Simulação retomada."
         if last_q:
             _resume_msg += f"\n\n{last_q}"
+        _reply = _make_assistant_message(
+            _resume_msg, user_message=prompt,
+            step_before=_step_before, type_before=_type_before)
         with st.chat_message("assistant"):
             st.markdown(_resume_msg)
-        st.session_state.messages.append({"role": "assistant", "content": _resume_msg})
-        try:
-            log_chat_message(
-                st.session_state["user"]["id"],
-                st.session_state["session_id"],
-                "assistant", _resume_msg,
-                st.session_state.get("sim_step"),
-            )
-        except Exception:
-            pass
+            _render_feedback_widget(_reply)
+        st.session_state.messages.append(_reply)
+        _log_message(_reply)
         save_study(st.session_state.study)
         st.stop()
 
@@ -3467,21 +3589,14 @@ if prompt:
                     for src in sources:
                         st.caption(f"• {src}")
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "sources": sources,
-    })
+        _reply = _make_assistant_message(
+            answer, sources=sources, user_message=prompt,
+            step_before=_step_before, type_before=_type_before)
+        _render_feedback_widget(_reply)
 
-    # Log assistant message
-    try:
-        log_chat_message(
-            st.session_state["user"]["id"],
-            st.session_state["session_id"],
-            "assistant", answer,
-            st.session_state.get("sim_step"),
-        )
-    except Exception:
-        pass
+    st.session_state.messages.append(_reply)
+
+    # Log assistant message (sim_step = step active after the reply)
+    _log_message(_reply)
 
     save_study(st.session_state.study)
