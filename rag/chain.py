@@ -1,9 +1,9 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from rag.retriever import get_retriever
+from rag.retriever import get_vectorstore
 from prompts.system_prompt import SYSTEM_PROMPT
 from config.settings import (
-    LLM_PROVIDER,
+    LLM_PROVIDER, TOP_K,
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL,
     GOOGLE_API_KEY, GEMINI_CHAT_MODEL,
 )
@@ -34,12 +34,13 @@ class SINChain:
     Simulation intent and context handling logic lives in the system prompt.
 
     Interface: chain.invoke({"question": ..., "study_context": ...})
-               → {"answer": ..., "source_documents": [...]}
+               → {"answer": ..., "source_documents": [...],
+                  "retrieval_scores": [{"source": ..., "score": ...}, ...]}
     """
 
     def __init__(self):
         self.llm = get_llm()
-        self.retriever = get_retriever()
+        self.vectorstore = get_vectorstore()
         self.chat_history: list = []
 
         self._prompt = ChatPromptTemplate.from_messages([
@@ -52,7 +53,15 @@ class SINChain:
         question = inputs["question"]
         study_context = inputs.get("study_context", "No study context defined yet.")
 
-        docs = self.retriever.invoke(question)
+        # ONE search returning documents and scores. Same query, same k (TOP_K) and
+        # same ranking as as_retriever(search_kwargs={"k": TOP_K}), whose default
+        # "similarity" mode calls similarity_search_with_score and drops the scores.
+        scored = self.vectorstore.similarity_search_with_score(question, k=TOP_K)
+        docs = [doc for doc, _ in scored]
+        retrieval_scores = [
+            {"source": doc.metadata.get("source", "desconhecido"), "score": float(score)}
+            for doc, score in scored
+        ]
         context = "\n\n".join(doc.page_content for doc in docs)
 
         messages = self._prompt.format_messages(
@@ -74,6 +83,7 @@ class SINChain:
         return {
             "answer": answer,
             "source_documents": docs,
+            "retrieval_scores": retrieval_scores,
         }
 
 

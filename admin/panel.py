@@ -11,10 +11,13 @@ import streamlit as st
 from agents.session_analysis import (
     FEEDBACK_CATEGORIES,
     FEEDBACK_STATUSES,
+    LEVEL_ICONS,
     OUTCOME_LABELS,
     aggregate_by_step,
     build_markdown_report,
     filter_session_summaries,
+    grounding_caption,
+    grounding_vs_rating,
     match_feedback_to_messages,
     summarize_session,
     timeline_text,
@@ -130,7 +133,10 @@ def _render_transcript(sess, messages, feedback, update_fn):
         who = (entry.get("full_name") or sess.get("full_name") or "Usuario") \
             if entry["role"] == "user" else "Assistente"
         _bubble(entry["role"], who, entry.get("sim_step"), entry["message"])
-        st.caption(f"{entry.get('created_at')} · passo: {entry.get('sim_step') or '-'}")
+        gcap = grounding_caption(entry.get("grounding_level"), entry.get("grounding_score")) \
+            if entry["role"] == "assistant" else ""
+        st.caption(f"{entry.get('created_at')} · passo: {entry.get('sim_step') or '-'}"
+                   + (f" · grounding {gcap}" if gcap else ""))
         for fb in fbs:
             _feedback_card(fb, "tr", update_fn)
 
@@ -435,6 +441,17 @@ def render_admin_panel():
         m4.metric("Resolvidos", by_status.get("resolvido", 0))
         m5.metric("👍 vs 👎", f"{by_rating.get('up', 0)} vs {by_rating.get('down', 0)}")
 
+        st.markdown("**Grounding × avaliação**")
+        g_rows = grounding_vs_rating(every)
+        if g_rows:
+            st.dataframe(pd.DataFrame([{
+                "Nível": f"{LEVEL_ICONS[r['level']]} {r['level']}",
+                "👍": r["up"], "👎": r["down"],
+                "Score médio 👍": r["avg_up"], "Score médio 👎": r["avg_down"],
+            } for r in g_rows]), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Ainda não há feedback com dados de grounding.")
+
         st.divider()
         fa, fb_, fc, fd = st.columns(4)
         f_status = fa.selectbox("Status", ["Todos"] + FEEDBACK_STATUSES, key="fb_f_status")
@@ -498,6 +515,9 @@ def render_admin_panel():
                     f"depois: {sel.get('sim_step_after') or '-'} · versão {sel.get('app_version') or '-'} · "
                     f"{sel.get('full_name') or ''} ({sel.get('email', '')}) · {sel['created_at']}"
                 )
+                _gc = grounding_caption(sel.get("grounding_level"), sel.get("grounding_score"))
+                if _gc:
+                    st.caption(f"Grounding no momento do envio: {_gc}")
                 st.button("Ver sessão completa", key=f"fb_open_{sel['id']}",
                           on_click=_go_to_session, args=(sel["session_id"],))
                 cur = sel["status"] if sel["status"] in FEEDBACK_STATUSES else "novo"
@@ -775,6 +795,8 @@ def render_admin_panel():
                         "sim_step_before": f.get("sim_step_before") or "",
                         "sim_step_after": f.get("sim_step_after") or "",
                         "app_version": f.get("app_version") or "", "status": f["status"],
+                        "grounding_level": f.get("grounding_level") or "",
+                        "grounding_score": f.get("grounding_score"),
                         "admin_note": f.get("admin_note") or "",
                         "user_message": f.get("user_message") or "",
                         "assistant_message": f.get("assistant_message") or "",

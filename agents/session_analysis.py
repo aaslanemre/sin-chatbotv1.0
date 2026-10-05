@@ -380,6 +380,34 @@ def aggregate_by_step(summaries, feedback=None) -> list:
     return rows
 
 
+LEVEL_ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
+
+
+def grounding_caption(level, score=None) -> str:
+    """'🟢 0.78' for admin bubbles; '' for old rows without grounding data."""
+    icon = LEVEL_ICONS.get(level)
+    if not icon:
+        return ""
+    return f"{icon} {float(score):.2f}" if score is not None else icon
+
+
+def grounding_vs_rating(feedback) -> list:
+    """Per grounding level: 👍/👎 counts and average score per rating (threshold tuning)."""
+    out = []
+    for level in ("green", "yellow", "red"):
+        items = [f for f in feedback or [] if f.get("grounding_level") == level]
+        if not items:
+            continue
+        def avg(rating):
+            v = [float(f["grounding_score"]) for f in items
+                 if f.get("rating") == rating and f.get("grounding_score") is not None]
+            return round(sum(v) / len(v), 3) if v else None
+        out.append({"level": level, "up": sum(1 for f in items if f.get("rating") == "up"),
+                    "down": sum(1 for f in items if f.get("rating") == "down"),
+                    "avg_up": avg("up"), "avg_down": avg("down")})
+    return out
+
+
 def _step_sort_key(step):
     m = re.match(r"([A-Z_]*?)(\d+)([A-Z]*)$", step or "")
     return (m.group(1), int(m.group(2)), m.group(3)) if m else (step or "", 0, "")
@@ -454,8 +482,10 @@ def build_markdown_report(summaries, feedback, filters=None, max_excerpts=3,
                     amsg = re.sub(r"\s+", " ", fb.get("assistant_message") or "").strip()
                     if len(amsg) > assistant_limit:
                         amsg = amsg[:assistant_limit].rstrip() + "…"
+                    gcap = grounding_caption(fb.get("grounding_level"), fb.get("grounding_score"))
                     lines += [
-                        f"  - {icon} [{cat}] status: {fb.get('status') or 'novo'}",
+                        f"  - {icon} [{cat}] status: {fb.get('status') or 'novo'}"
+                        + (f" · grounding: {gcap}" if gcap else ""),
                         f"    - Comentário do tester: {clean_excerpt(fb.get('comment'), 500) or '(sem comentário)'}",
                         f"    - Mensagem do assistente: {_EMAIL_RE.sub('[email]', amsg)}",
                     ]

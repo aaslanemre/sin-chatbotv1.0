@@ -195,15 +195,17 @@ def manually_verify_user(user_id: str) -> bool:
 # ── Chat logging ─────────────────────────────────────────────────────────────
 
 def log_chat_message(user_id: str, session_id: str, role: str, message: str,
-                     sim_step: str = None, message_id: str = None, sim_type: str = None):
+                     sim_step: str = None, message_id: str = None, sim_type: str = None,
+                     grounding_score: float = None, grounding_level: str = None):
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             """INSERT INTO chat_logs (user_id, session_id, role, message, sim_step,
-                                      message_id, sim_type)
-               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s)""",
-            (user_id, session_id, role, message, sim_step, message_id, sim_type),
+                                      message_id, sim_type, grounding_score, grounding_level)
+               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s)""",
+            (user_id, session_id, role, message, sim_step, message_id, sim_type,
+             grounding_score, grounding_level),
         )
         conn.commit()
     finally:
@@ -218,7 +220,7 @@ def get_chat_logs(start_date=None, end_date=None, user_id=None) -> list[dict]:
         query = """
             SELECT cl.id, cl.user_id, u.email, u.full_name, cl.session_id,
                    cl.role, cl.message, cl.sim_step, cl.message_id, cl.sim_type,
-                   cl.created_at
+                   cl.grounding_score, cl.grounding_level, cl.created_at
             FROM chat_logs cl
             JOIN users u ON cl.user_id = u.id
             WHERE 1=1
@@ -255,7 +257,8 @@ def get_chat_logs_for_sessions(session_ids: list) -> list[dict]:
     try:
         cur.execute(
             """SELECT cl.id, cl.user_id, cl.session_id, cl.role, cl.message,
-                      cl.sim_step, cl.message_id, cl.sim_type, cl.created_at
+                      cl.sim_step, cl.message_id, cl.sim_type,
+                      cl.grounding_score, cl.grounding_level, cl.created_at
                FROM chat_logs cl
                WHERE cl.session_id = ANY(%s::uuid[])
                ORDER BY cl.created_at""",
@@ -478,7 +481,8 @@ def _feedback_rows(cur) -> list[dict]:
 
 def submit_feedback(user_id, session_id, message_id, rating, category, comment,
                     assistant_message, user_message, sim_type,
-                    sim_step_before, sim_step_after, app_version):
+                    sim_step_before, sim_step_after, app_version,
+                    grounding_score=None, grounding_level=None):
     """Upsert feedback for (user, message). Resubmitting updates the row and keeps its status."""
     conn = get_connection()
     cur = conn.cursor()
@@ -487,8 +491,9 @@ def submit_feedback(user_id, session_id, message_id, rating, category, comment,
             """INSERT INTO feedback
                    (user_id, session_id, message_id, rating, category, comment,
                     assistant_message, user_message, sim_type,
-                    sim_step_before, sim_step_after, app_version)
-               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    sim_step_before, sim_step_after, app_version,
+                    grounding_score, grounding_level)
+               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (user_id, message_id) DO UPDATE SET
                    rating = EXCLUDED.rating,
                    category = EXCLUDED.category,
@@ -496,7 +501,8 @@ def submit_feedback(user_id, session_id, message_id, rating, category, comment,
                    updated_at = now()""",
             (user_id, session_id, message_id, rating, category, comment,
              assistant_message, user_message, sim_type,
-             sim_step_before, sim_step_after, app_version),
+             sim_step_before, sim_step_after, app_version,
+             grounding_score, grounding_level),
         )
         conn.commit()
     except Exception:

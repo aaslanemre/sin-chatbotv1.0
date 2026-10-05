@@ -101,6 +101,9 @@ def init_db():
     # v6.4.0 — additive only: link chat rows to messages and record sim type
     cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS message_id TEXT;")
     cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS sim_type TEXT;")
+    # v6.4.1 — grounding confidence snapshot (additive; old rows stay NULL)
+    cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS grounding_score REAL;")
+    cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS grounding_level TEXT;")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS feedback (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -123,6 +126,8 @@ def init_db():
             UNIQUE (user_id, message_id)
         );
     """)
+    cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS grounding_score REAL;")
+    cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS grounding_level TEXT;")
     conn.commit()
     cur.close()
     conn.close()

@@ -32,6 +32,16 @@ CHUNK_OVERLAP      = 100
 TOP_K              = 5
 SIMILARITY_THRESHOLD = 0.45
 
+# Grounding confidence — top-1 cosine score bands (tunable via env, no code change)
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except ValueError:
+        return float(default)
+
+GROUNDING_THRESHOLD     = _env_float("GROUNDING_THRESHOLD", 0.75)      # >= -> green
+GROUNDING_THRESHOLD_LOW = _env_float("GROUNDING_THRESHOLD_LOW", 0.65)  # >= and < high -> yellow; below or no chunks -> red
+
 # Paths
 INCOMING_DOCS_DIR  = os.getenv("INCOMING_DOCS_DIR", "docs/incoming")
 PROCESSED_DOCS_DIR = os.getenv("PROCESSED_DOCS_DIR", "docs/processed")

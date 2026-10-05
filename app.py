@@ -18,6 +18,12 @@ from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
 from config.version import APP_VERSION
 from agents.session_analysis import FEEDBACK_CATEGORIES
+from agents import grounding as _grounding
+try:
+    from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
+except ImportError:  # settings needs python-dotenv; keep the app importable without it
+    GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW = _grounding.DEFAULT_HIGH, _grounding.DEFAULT_LOW
+_G_HIGH, _G_LOW = _grounding.validated_thresholds(GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW)
 from auth.auth_service import (
     signup, login,
     log_chat_message, create_session, update_session,
@@ -162,7 +168,7 @@ def _sim_snapshot() -> tuple:
 
 
 def _make_assistant_message(content, *, sources=None, user_message=None,
-                            step_before=None, type_before=None) -> dict:
+                            step_before=None, type_before=None, grounding=None) -> dict:
     """Assistant message dict with a stable id and the sim context for feedback/analysis."""
     step_after, type_after = _sim_snapshot()
     msg = {
@@ -176,12 +182,18 @@ def _make_assistant_message(content, *, sources=None, user_message=None,
     }
     if sources is not None:
         msg["sources"] = sources
+    if grounding:  # only free-conversation RAG answers carry grounding data
+        msg.update(grounding)
     return msg
 
 
 def _log_message(msg: dict, step=None, sim_type=None):
     """Write a message to chat_logs with its id. Never raises (chat must keep working)."""
     try:
+        extra = {}
+        if msg.get("grounding_level"):
+            extra = {"grounding_score": msg.get("grounding_score"),
+                     "grounding_level": msg["grounding_level"]}
         log_chat_message(
             st.session_state["user"]["id"],
             st.session_state["session_id"],
@@ -189,6 +201,7 @@ def _log_message(msg: dict, step=None, sim_type=None):
             step if step is not None else msg.get("sim_step_after"),
             message_id=msg.get("message_id"),
             sim_type=sim_type if sim_type is not None else msg.get("sim_type"),
+            **extra,
         )
     except Exception:
         pass
@@ -221,11 +234,16 @@ def _submit_feedback_for(msg: dict, rating: str, category, comment: str) -> bool
     """Persist feedback. Touches NO simulation state. Returns True on success."""
     try:
         from auth.auth_service import submit_feedback
+        extra = {}
+        if msg.get("grounding_level"):
+            extra = {"grounding_score": msg.get("grounding_score"),
+                     "grounding_level": msg["grounding_level"]}
         submit_feedback(
             st.session_state["user"]["id"], st.session_state["session_id"],
             msg["message_id"], rating, category, comment,
             msg.get("content"), msg.get("user_message"), msg.get("sim_type"),
             msg.get("sim_step_before"), msg.get("sim_step_after"), APP_VERSION,
+            **extra,
         )
     except Exception:
         return False
@@ -278,11 +296,75 @@ def _render_feedback_widget(msg: dict):
         st.caption("✅ Feedback enviado")
 
 
+# ── Grounding confidence (free-conversation RAG answers only) ─────────────────
+
+_PWF_OUTPUT_RE = re.compile(r"^\s*(DBAR|DLIN|DCER|DCTG)\b", re.M)
+
+
+def _grounding_enabled() -> bool:
+    """False (no badge, no disclosure) unless the Qdrant collection uses Cosine."""
+    def _distance():
+        from rag.retriever import get_collection_distance
+        return get_collection_distance()
+    return _grounding.collection_is_cosine(_distance)
+
+
+def _grounding_applies(question, answer) -> bool:
+    """Call only for a successful free RAG (LLM) answer."""
+    if (st.session_state.get("sim_data") or {}).get("sim_type") == "NETWORK":
+        return False
+    if str(st.session_state.get("sim_step", "")).startswith("NET"):
+        return False
+    if _PWF_OUTPUT_RE.search(answer or ""):
+        return False
+    if _grounding.is_meta_reply(question, answer):
+        return False
+    return _grounding_enabled()
+
+
+def _grounding_for(retrieval_scores) -> dict:
+    top = _grounding.top_score(retrieval_scores)
+    return {
+        "grounding_score": top,
+        "grounding_level": _grounding.classify_grounding(retrieval_scores, _G_HIGH, _G_LOW),
+        "retrieval_scores": retrieval_scores or [],
+    }
+
+
+def _render_badge(level):
+    st.caption(_grounding.BADGE_LABELS[level])
+
+
+def _render_sources_panel(retrieval_scores, level):
+    import os as _os
+    with st.expander("📄 Fontes consultadas"):
+        def _name(item):
+            return _os.path.basename(item["source"]) or item["source"]
+        if level == "red":
+            if retrieval_scores:
+                best = max(retrieval_scores, key=lambda x: x["score"])
+                st.caption(
+                    "Nenhum documento com relevância suficiente foi encontrado. "
+                    f"Melhor resultado: **{_name(best)}** — {best['score']:.2f} "
+                    f"(abaixo do limite de {_G_LOW:.2f})"
+                )
+            else:
+                st.caption("Nenhum documento foi recuperado.")
+        else:
+            for item in retrieval_scores:
+                st.caption(f"• {_name(item)}  —  {item['score']:.2f}")
+
+
 def _render_message(msg: dict):
-    """Render one history message (+ sources and feedback widget for assistant)."""
+    """Render one history message (+ badge, sources and feedback widget for assistant)."""
     with st.chat_message(msg["role"]):
+        level = msg.get("grounding_level")
+        if level in _grounding.BADGE_LABELS:
+            _render_badge(level)
         st.markdown(msg["content"])
-        if "sources" in msg and msg["sources"]:
+        if level in _grounding.BADGE_LABELS and "retrieval_scores" in msg:
+            _render_sources_panel(msg["retrieval_scores"], level)
+        elif "sources" in msg and msg["sources"]:
             with st.expander("📄 Fontes consultadas"):
                 for src in msg["sources"]:
                     st.caption(f"• {src}")
@@ -3510,6 +3592,7 @@ if prompt:
     # Try state machine first
     sim_response = _handle_sim_state(prompt)
 
+    _grounding_info = None
     with st.chat_message("assistant"):
         if sim_response is not None:
             # Deterministic simulation guide response
@@ -3572,6 +3655,11 @@ if prompt:
                         "study_context": study_context,
                     })
                     answer = result["answer"] + sim_context_note
+                    _scores = result.get("retrieval_scores")
+                    if _scores is not None and _grounding_applies(full_prompt, result["answer"]):
+                        _grounding_info = _grounding_for(_scores)
+                        if _grounding_info["grounding_level"] == "red":
+                            answer = f"{_grounding.DISCLOSURE}\n\n{answer}"
                     sources = list({
                         doc.metadata.get("source", "desconhecido")
                         for doc in result.get("source_documents", [])
@@ -3583,15 +3671,21 @@ if prompt:
                     ) + sim_context_note
                     sources = []
 
+            if _grounding_info:
+                _render_badge(_grounding_info["grounding_level"])
             st.markdown(answer)
-            if sources:
+            if _grounding_info:
+                _render_sources_panel(_grounding_info["retrieval_scores"],
+                                      _grounding_info["grounding_level"])
+            elif sources:
                 with st.expander("📄 Fontes consultadas"):
                     for src in sources:
                         st.caption(f"• {src}")
 
         _reply = _make_assistant_message(
             answer, sources=sources, user_message=prompt,
-            step_before=_step_before, type_before=_type_before)
+            step_before=_step_before, type_before=_type_before,
+            grounding=_grounding_info)
         _render_feedback_widget(_reply)
 
     st.session_state.messages.append(_reply)

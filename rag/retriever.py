@@ -23,13 +23,26 @@ def get_embeddings():
         )
 
 
-def get_retriever():
+def get_vectorstore():
     embeddings = get_embeddings()
-    vectorstore = QdrantVectorStore.from_existing_collection(
+    return QdrantVectorStore.from_existing_collection(
         embedding=embeddings,
         url=f"http://{QDRANT_HOST}:{QDRANT_PORT}",
         collection_name=QDRANT_COLLECTION,
     )
-    return vectorstore.as_retriever(
+
+
+def get_retriever():
+    return get_vectorstore().as_retriever(
         search_kwargs={"k": TOP_K},
     )
+
+
+def get_collection_distance():
+    """Distance metric of the Qdrant collection (single unnamed vector or first named one)."""
+    from qdrant_client import QdrantClient
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    vectors = client.get_collection(QDRANT_COLLECTION).config.params.vectors
+    if isinstance(vectors, dict):
+        vectors = next(iter(vectors.values()))
+    return vectors.distance

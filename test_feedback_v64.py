@@ -75,12 +75,12 @@ svc = sys.modules["auth.auth_service"]
 logged, submitted = [], []
 fail = {"log": False, "submit": False, "load": False}
 
-def _log(user_id, session_id, role, message, sim_step=None, message_id=None, sim_type=None):
+def _log(user_id, session_id, role, message, sim_step=None, message_id=None, sim_type=None, **kw):
     if fail["log"]: raise RuntimeError("db down")
     logged.append({"role": role, "message": message, "sim_step": sim_step,
                    "message_id": message_id, "sim_type": sim_type})
 
-def _submit(*args):
+def _submit(*args, **kw):
     if fail["submit"]: raise RuntimeError("db down")
     submitted.append(args)
 
@@ -125,7 +125,7 @@ lite.row_factory = sqlite3.Row
 lite.execute("""CREATE TABLE feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id, session_id, message_id,
     rating, category, comment, assistant_message, user_message, sim_type, sim_step_before, sim_step_after,
     app_version, status DEFAULT 'novo', admin_note, created_at DEFAULT CURRENT_TIMESTAMP,
-    updated_at DEFAULT CURRENT_TIMESTAMP, UNIQUE (user_id, message_id))""")
+    updated_at DEFAULT CURRENT_TIMESTAMP, grounding_score, grounding_level, UNIQUE (user_id, message_id))""")
 
 class _Cur:
     def __init__(self): self.c = lite.cursor()
@@ -174,7 +174,7 @@ fresh_state()
 env = run_app()
 make, render_widget = env["_make_assistant_message"], env["_render_feedback_widget"]
 VERSION = env["APP_VERSION"]
-check("APP_VERSION constant is v6.4.0", VERSION == "v6.4.0")
+check("APP_VERSION constant is set (single source)", VERSION == "v6.4.1")
 
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n═══ 2. submit leaves simulation state untouched ═══\n")
@@ -200,7 +200,7 @@ def exercise(label, step, data, status, sim_mode):
     check(f"{label}: feedback saved + thanks toast + ✅ state", len(submitted) == 1 and "Obrigado pelo feedback!" in calls["toast"]
           and msg["message_id"] in ss["_feedback_cache"])
     check(f"{label}: snapshot carries version/step/type/user msg",
-          submitted[0][-1] == "v6.4.0" and submitted[0][7] == "2028" and submitted[0][8] == data["sim_type"] and submitted[0][2] == msg["message_id"], submitted[0])
+          submitted[0][11] == VERSION and submitted[0][7] == "2028" and submitted[0][8] == data["sim_type"] and submitted[0][2] == msg["message_id"], submitted[0])
 
 exercise("BESS STEP7", "STEP7", {"sim_type": "BESS", "db": "ONS", "years": [2028]}, "active", True)
 exercise("NET state", "NET3_LINES", {"sim_type": "NETWORK", "network": {"title": "x", "base_mva": 100.0, "buses": [{"n": 1}], "lines": []}}, "active", True)
