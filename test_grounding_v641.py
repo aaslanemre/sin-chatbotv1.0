@@ -36,6 +36,7 @@ st.chat_message = lambda *a, **kw: _Ctx()
 st.spinner = lambda *a, **kw: _Ctx()
 st.expander = lambda *a, **kw: _Ctx()
 st.container = lambda *a, **kw: _Ctx()  # v6.5.0 banner
+st.toggle = st.progress = lambda *a, **kw: None  # v6.5.0 sidebar
 st.popover = lambda *a, **kw: _Ctx()
 st.form = lambda *a, **kw: _Ctx()
 st.radio = lambda l, opts, index=None, **kw: script["rating"] or (opts[index] if index is not None else None)
@@ -275,7 +276,8 @@ lite.execute("""CREATE TABLE feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, use
   status DEFAULT 'novo', admin_note, created_at DEFAULT CURRENT_TIMESTAMP, updated_at DEFAULT CURRENT_TIMESTAMP,
   grounding_score REAL, grounding_level TEXT, UNIQUE (user_id, message_id))""")
 lite.execute("""CREATE TABLE chat_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id, session_id, role, message,
-  sim_step, message_id, sim_type, grounding_score REAL, grounding_level TEXT, created_at DEFAULT CURRENT_TIMESTAMP)""")
+  sim_step, message_id, sim_type, grounding_score REAL, grounding_level TEXT, created_at DEFAULT CURRENT_TIMESTAMP,
+  input_source TEXT)""")  # v6.5.0 column (auth/db.py)
 class _Cur:
     def __init__(self): self.c = lite.cursor()
     def execute(self, sql, params=()):

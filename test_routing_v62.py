@@ -57,6 +57,7 @@ _st_mod.chat_message = lambda *a, **kw: _CtxMgr()
 _st_mod.spinner      = lambda *a, **kw: _CtxMgr()
 _st_mod.expander     = lambda *a, **kw: _CtxMgr()
 _st_mod.container    = lambda *a, **kw: _CtxMgr()  # v6.5.0 banner
+_st_mod.toggle = _st_mod.progress = lambda *a, **kw: None  # v6.5.0 sidebar
 
 sys.modules["streamlit"] = _st_mod
 

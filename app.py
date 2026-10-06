@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import importlib
 import re
@@ -20,6 +21,8 @@ from config.version import APP_VERSION, RELEASE_NOTES
 from agents.session_analysis import FEEDBACK_CATEGORIES
 from agents import grounding as _grounding
 from agents import ux as _ux
+from agents import structured_input as _si
+from config.glossary import GLOSSARY, GLOSSARY_STATUS, find_terms as _glossary_terms
 try:
     from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
 except ImportError:  # settings needs python-dotenv; keep the app importable without it
@@ -209,6 +212,8 @@ def _log_message(msg: dict, step=None, sim_type=None):
         if msg.get("grounding_level"):
             extra = {"grounding_score": msg.get("grounding_score"),
                      "grounding_level": msg["grounding_level"]}
+        if msg.get("input_source"):  # user rows: typed | button | form
+            extra["input_source"] = msg["input_source"]
         log_chat_message(
             st.session_state["user"]["id"],
             st.session_state["session_id"],
@@ -437,7 +442,7 @@ def _render_body(msg: dict):
                 _render_pwf_download(seg[2], seg[3], msg, i)
     else:
         st.markdown(main)
-    if details:
+    if details and not _expert():   # especialista: not even in an expander
         with st.expander("Detalhes"):
             st.markdown(details)
 
@@ -3515,6 +3520,309 @@ def _handle_sim_state(user_text: str) -> str | None:
     return None  # fallback to LLM
 
 
+# ── Study panel: edit one parameter (✏️) ──────────────────────────────────────
+# A ✏️ click re-asks ONE question. The answer is parsed with the same parsers the
+# step uses, then the flow returns to the step the user was at, except where the
+# change invalidates later values:
+#   db       → clears year(s) and scenario (and the device parameters, whose bus
+#              numbers belong to the old base) and returns to STEP2
+#   year(s)  → keeps the scenario; reminds to load the new year's case if the
+#              case was already loaded (STEP4 shows the new SAV hint)
+#   scenario → same as year(s)
+#   device parameter after the PWF block was generated (STEP9+) → BESS: block
+#              regenerated, back to STEP9 (save); STATCOM: back to the controlled
+#              bus question, which regenerates the block
+#   sim_type → not editable here (new simulation)
+
+_PARPEL_NAMES = list(dict.fromkeys(_PARPEL_SCENARIO_NAMES.values()))
+_PDE_NAMES = list(dict.fromkeys(_PDE_SCENARIO_NAMES.values()))
+
+_EDIT_LABELS = {
+    "db": "Base de dados", "years": "Ano(s)", "scenario": "Cenário",
+    "bess_bus": "Barra", "statcom_bus": "Barra", "bess_mode": "Modo",
+    "bess_mva": "Potência nominal", "bess_p_mw": "Potência ativa",
+    "bess_bus_number": "Nova barra da BESS", "statcom_q": "Limites reativos",
+    "net_title": "Título do caso",
+}
+
+_DEVICE_KEYS = ("bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode",
+                "statcom_bus", "statcom_q_min", "statcom_q_max")
+_POST_PWF_STEPS = ("STEP9", "STEP10", "STEP11", "STEP11B", "STEP12")
+_CASE_LOADED_STEPS = ("STEP6", "STEP7", "STEP8", "STATCOM_STEP_Q", "STATCOM_STEP_CBUS") + _POST_PWF_STEPS
+_EDIT_CANCEL = ("cancelar", "cancela", "manter", "cancel")
+_EDIT_PASSTHROUGH = ("quero simular", "iniciar simulação", "nova simulação", "começar de novo",
+                     "quero inserir um bess", "quero inserir um statcom")
+_EDIT_END = {"encerrar", "encerra", "finalizar", "finaliza", "terminar", "fim", "sair"}
+
+
+def _db_label(db):
+    return "PAR/PEL (ONS)" if db == "ONS" else "PDE (EPE)"
+
+
+def _param_value(field, data):
+    if field == "db":
+        return _db_label(data.get("db"))
+    if field == "years":
+        return ", ".join(str(y) for y in data.get("years", []))
+    if field == "bess_mode":
+        return {"PV": "PV (controle de tensão)", "PQ": "PQ (despacho fixo)"}.get(data.get("bess_mode"), "—")
+    if field == "bess_mva":
+        return f"{data.get('bess_mva')} MVA"
+    if field == "bess_p_mw":
+        return f"{data.get('bess_p_mw')} MW"
+    if field == "statcom_q":
+        return f"{_si.fmt_num(data.get('statcom_q_min', 0))} a {_si.fmt_num(data.get('statcom_q_max', 0))} Mvar"
+    if field == "net_title":
+        return (data.get("network") or {}).get("title", "—")
+    return str(data.get(field, "—"))
+
+
+def _edit_question(field):
+    data = st.session_state.sim_data
+    if field == "db":
+        return "Qual base de dados deseja utilizar? **EPE (PDE)** ou **ONS (PAR/PEL)**?"
+    if field == "years":
+        return "Qual ano (ou anos) deseja estudar? (ex: **2028** ou **2027, 2028, 2029**)"
+    if field == "scenario":
+        return _PARPEL_SCENARIOS if data.get("db") == "ONS" else _PDE_SCENARIOS
+    if field in ("bess_bus", "statcom_bus"):
+        dev = "o STATCOM" if field == "statcom_bus" else "a BESS"
+        return f"Qual é a barra onde deseja inserir {dev}?"
+    if field == "bess_mode":
+        return _BESS_MODE_QUESTION
+    if field == "bess_mva":
+        return "**Qual a potência nominal da BESS em MVA?**"
+    if field == "bess_p_mw":
+        return "**Qual a potência ativa em MW?**"
+    if field == "bess_bus_number":
+        return ("Qual número de barra está disponível no seu caso para a nova barra da BESS? "
+                "(escolha um número que não exista no caso atual)")
+    if field == "statcom_q":
+        return "Informe Qmin e Qmax em Mvar (ex: `Qmin -100 Mvar, Qmax 100 Mvar`)."
+    if field == "net_title":
+        return "Qual o novo título do caso?"
+    return ""
+
+
+def _start_edit(field):
+    """✏️ callback (sidebar): ask that one question; the answer goes through _handle_edit."""
+    st.session_state["_edit_pending"] = {"field": field, "return_step": st.session_state.sim_step}
+    data = st.session_state.sim_data
+    _append_system_assistant_message(
+        f"✏️ **Alterar {_EDIT_LABELS[field].lower()}** (atual: **{_param_value(field, data)}**)\n\n"
+        f"{_edit_question(field)}\n\nDigite **cancelar** para manter o valor atual."
+    )
+
+
+def _parse_p_mw(text):
+    """STEP8 sub-step 8b parsing (active power in MW)."""
+    p_mw = _parse_active_power(text)
+    if p_mw is None:
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*mw\b", text, re.IGNORECASE)
+        if m:
+            p_mw = m.group(1).replace(",", ".")
+    if p_mw is None:
+        m = re.search(r"^\s*(\d+(?:[.,]\d+)?)\s*$", text.strip())
+        if m:
+            p_mw = m.group(1).replace(",", ".")
+    return p_mw
+
+
+def _case_change_note(step):
+    data = st.session_state.sim_data
+    year, scenario, db = data.get("year"), data.get("scenario"), data.get("db", "ONS")
+    if step == "STEP4" and year and scenario:
+        return "\n\n" + _sav_filename_hint(db, scenario, year)
+    note = ""
+    if step in _CASE_LOADED_STEPS and year and scenario:
+        note = (f"\n\n⚠️ Carregue no ANAREDE o caso do ano **{year}**, cenário **{scenario}** "
+                "(Histórico > Operações > Restabelecer) antes de continuar.")
+    q = _current_step_question()
+    return note + (f"\n\n{q}" if q else "")
+
+
+def _device_change_reply(msg, step):
+    data = st.session_state.sim_data
+    if step in _POST_PWF_STEPS:
+        data.pop("divergence_color", None)
+        data.pop("contingency_stage", None)
+        if data.get("sim_type") == "STATCOM":
+            st.session_state.sim_step = "STATCOM_STEP_CBUS"
+            return (msg + "\n\nO bloco DBAR/DCER depende desse valor e será gerado de novo.\n\n"
+                    + _current_step_question())
+        if all(k in data for k in ("bess_bus", "bess_mode", "bess_mva", "bess_p_mw", "bess_bus_number")):
+            st.session_state.sim_step = "STEP9"
+            return (
+                msg + "\n\nO bloco DBAR/DLIN foi gerado de novo — use-o no lugar do anterior.\n\n"
+                + _bess_pwf_lines(data)
+                + "\n\n---\n\n"
+                "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
+                "No ANAREDE:\n"
+                "1. Vá em **Histórico > Operações**\n"
+                "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
+                "3. Clique em **Salvar**\n\n"
+                "Confirme quando o caso estiver salvo."
+            )
+    q = _current_step_question()
+    return msg + (f"\n\n{q}" if q else "")
+
+
+def _handle_edit(user_text):
+    """
+    Answer to a ✏️ question. Returns (handled, response):
+      (False, None) → not an edit answer (encerrar / restart): normal handler runs
+      (True, None)  → free question: the LLM answers, the edit stays pending
+      (True, text)  → deterministic reply
+    """
+    ep = st.session_state["_edit_pending"]
+    field, step = ep["field"], st.session_state.sim_step
+    data = st.session_state.sim_data
+    t = user_text.strip().lower()
+    label = _EDIT_LABELS[field]
+
+    if t in _EDIT_CANCEL:
+        st.session_state.pop("_edit_pending", None)
+        q = _current_step_question()
+        return True, "Alteração cancelada; o valor atual foi mantido." + (f"\n\n{q}" if q else "")
+    if _EDIT_END & set(re.findall(r"\w+", t)) or any(p in t for p in _EDIT_PASSTHROUGH):
+        st.session_state.pop("_edit_pending", None)
+        return False, None
+    if _is_free_question(user_text):
+        return True, None
+
+    def retry(extra=""):
+        return True, (f"{extra}Não identifiquei {label.lower()}. {_edit_question(field)}\n\n"
+                      "Ou digite **cancelar** para manter o valor atual.")
+
+    if field == "db":
+        if t == "3" or any(w in t for w in ["rede", "zero", "própria", "propria", "montar"]):
+            return retry("Trocar para uma rede própria muda o tipo de simulação — "
+                         "para isso, inicie uma nova simulação.\n\n")
+        if t == "1" or any(w in t for w in ["epe", "pde", "expansão", "expansao", "longo prazo"]):
+            new = "EPE"
+        elif t == "2" or any(w in t for w in ["ons", "par", "pel", "operacional"]):
+            new = "ONS"
+        else:
+            return retry()
+        st.session_state.pop("_edit_pending", None)
+        if new == data.get("db"):
+            q = _current_step_question()
+            return True, f"A base de dados já é **{_db_label(new)}**." + (f"\n\n{q}" if q else "")
+        had_device = any(k in data for k in _DEVICE_KEYS)
+        data["db"] = new
+        for k in ("years", "year", "year_idx", "scenario", "contingency_stage", "divergence_color") + _DEVICE_KEYS:
+            data.pop(k, None)
+        st.session_state.sim_step = "STEP2"
+        return True, (
+            f"✏️ Base de dados alterada para **{_db_label(new)}**. Ano(s) e cenário foram apagados "
+            "porque dependem da base"
+            + (" — e os parâmetros do equipamento também, pois as barras mudam de uma base para outra"
+               if had_device else "")
+            + ".\n\n" + _current_step_question()
+        )
+
+    if field == "years":
+        years = _parse_years(user_text)
+        if not years:
+            return retry()
+        st.session_state.pop("_edit_pending", None)
+        data["years"], data["year_idx"] = years, 0
+        if "year" in data:
+            data["year"] = years[0]
+        return True, (f"✏️ Ano(s) alterado(s) para **{', '.join(str(y) for y in years)}**. "
+                      "O cenário foi mantido." + _case_change_note(step))
+
+    if field == "scenario":
+        scenario = _parse_scenario(user_text, data.get("db", "ONS"))
+        if scenario is None:
+            return retry()
+        st.session_state.pop("_edit_pending", None)
+        data["scenario"] = scenario
+        return True, f"✏️ Cenário alterado para **{scenario}**." + _case_change_note(step)
+
+    if field == "net_title":
+        title = user_text.strip()[:50]
+        if not title:
+            return retry()
+        st.session_state.pop("_edit_pending", None)
+        data.setdefault("network", {})["title"] = title
+        q = _current_step_question()
+        return True, f"✏️ Título do caso alterado para **{title}**." + (f"\n\n{q}" if q else "")
+
+    # Device parameters — same parsers as STEP7 / STEP8 / STATCOM_STEP_Q
+    if field in ("bess_bus", "statcom_bus"):
+        m = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
+        value = m.group(1) if m else (user_text.strip() if 2 <= len(user_text.strip()) <= 50 else None)
+        if value is None:
+            return retry()
+        data[field] = value
+        shown = value
+    elif field == "bess_mode":
+        mode = _parse_bess_mode(user_text)
+        if mode is None:
+            return retry()
+        data["bess_mode"] = mode
+        shown = _param_value("bess_mode", data)
+    elif field == "bess_mva":
+        mva = _parse_mva(user_text)
+        if mva is None:
+            return retry()
+        data["bess_mva"] = mva
+        shown = f"{mva} MVA"
+    elif field == "bess_p_mw":
+        p = _parse_p_mw(user_text)
+        if p is None:
+            return retry()
+        data["bess_p_mw"] = p
+        shown = f"{p} MW"
+    elif field == "bess_bus_number":
+        m = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
+        if not m:
+            return retry()
+        data["bess_bus_number"] = m.group(1)
+        shown = m.group(1)
+    elif field == "statcom_q":
+        q_min, q_max = _parse_q_limits(user_text)
+        if q_min is None or q_max is None:
+            return retry()
+        data["statcom_q_min"], data["statcom_q_max"] = q_min, q_max
+        shown = _param_value("statcom_q", data)
+    else:
+        st.session_state.pop("_edit_pending", None)
+        return False, None
+    st.session_state.pop("_edit_pending", None)
+    return True, _device_change_reply(f"✏️ {label} alterado(a) para **{shown}**.", step)
+
+
+def _study_params(data):
+    """[(field or None, label, value)] for the study panel; field None = read-only."""
+    stype = data.get("sim_type")
+    if stype == "NETWORK":
+        net = data.get("network") or {}
+        return [("net_title", "Título", net.get("title", "—")),
+                (None, "Base", f"{_si.fmt_num(net.get('base_mva', 100.0))} MVA"),
+                (None, "Barras", len(net.get("buses", []))),
+                (None, "Linhas", len(net.get("lines", [])))]
+    out = []
+    if "db" in data:
+        out.append(("db", "Base de dados", _param_value("db", data)))
+    if data.get("years"):
+        out.append(("years", "Ano(s)", _param_value("years", data)))
+    if data.get("scenario"):
+        out.append(("scenario", "Cenário", data["scenario"]))
+    if stype == "STATCOM":
+        if "statcom_bus" in data:
+            out.append(("statcom_bus", "Barra", data["statcom_bus"]))
+        if "statcom_q_min" in data:
+            out.append(("statcom_q", "Limites Q", _param_value("statcom_q", data)))
+    else:
+        for f, lbl in (("bess_bus", "Barra"), ("bess_mode", "Modo"), ("bess_mva", "S"),
+                       ("bess_p_mw", "P"), ("bess_bus_number", "Nova barra")):
+            if f in data:
+                out.append((f, lbl, _param_value(f, data)))
+    return out
+
+
 def _load_chain():
     try:
         import rag.chain as _chain_mod
@@ -3530,6 +3838,145 @@ if st.session_state.chain is None and st.session_state.chain_error is None:
     with st.spinner("Carregando modelos e base de conhecimento..."):
         _load_chain()
 
+# ── Modo iniciante / especialista (saved per user) ────────────────────────────
+
+_EXPERT_NOTE = (
+    "Preferência do usuário (modo especialista): responda de forma concisa e direta, "
+    "sem introduções nem explicações básicas."
+)
+
+
+def _ui_mode() -> str:
+    return (st.session_state.get("user") or {}).get("ui_mode") or "iniciante"
+
+
+def _expert() -> bool:
+    return _ui_mode() == "especialista"
+
+
+def _on_mode_toggle():
+    mode = "especialista" if st.session_state.get("_ui_mode_toggle") else "iniciante"
+    st.session_state["user"]["ui_mode"] = mode
+    try:
+        from auth.auth_service import set_ui_mode
+        set_ui_mode(st.session_state["user"]["id"], mode)
+    except Exception:
+        pass  # preference still applies for this session
+
+
+# ── "Minhas conversas" ────────────────────────────────────────────────────────
+
+def _open_history():
+    st.session_state["_view"] = "history"
+    st.session_state.pop("_history_open", None)
+
+
+def _close_history():
+    st.session_state["_view"] = "chat"
+    st.session_state.pop("_history_open", None)
+
+
+def _open_conversation(session_id):
+    st.session_state["_history_open"] = session_id
+
+
+def _new_conversation():
+    """Fresh chat in a new session (the previous one stays in 'Minhas conversas')."""
+    st.session_state.messages = [st.session_state.messages[0]]
+    st.session_state.simulation_mode = False
+    st.session_state.sim_step = "IDLE"
+    st.session_state.sim_data = {}
+    st.session_state.sim_status = None
+    st.session_state.study = StudyState()
+    for k in ("_links_shown", "_edit_pending", "_input_queue", "_lt_confirm_question"):
+        st.session_state.pop(k, None)
+    st.session_state.chain = None
+    st.session_state.chain_error = None
+    clear_study()
+    _sid = str(uuid.uuid4())
+    st.session_state["session_id"] = _sid
+    try:
+        create_session(_sid, st.session_state["user"]["id"])
+    except Exception:
+        pass
+    _close_history()
+
+
+def _render_history_view():
+    """Read-only list/transcripts of the logged-in user's own sessions."""
+    from auth.auth_service import list_user_sessions, get_user_session_messages
+    uid = st.session_state["user"]["id"]
+    st.markdown("### 🗂️ Minhas conversas")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.button("← Voltar à conversa", on_click=_close_history, use_container_width=True)
+    with c2:
+        st.button("➕ Nova conversa", on_click=_new_conversation, use_container_width=True)
+
+    open_sid = st.session_state.get("_history_open")
+    if open_sid:
+        st.button("← Todas as conversas", on_click=_open_history)
+        try:
+            msgs = get_user_session_messages(uid, open_sid)   # filtered by user_id in SQL
+        except Exception:
+            msgs = []
+        if not msgs:
+            st.info("Conversa não encontrada.")
+            return
+        st.caption(f"Conversa de {str(msgs[0].get('created_at'))[:16]} · somente leitura")
+        for m in msgs:
+            with st.chat_message(m["role"]):
+                st.markdown(m["message"])
+        return
+
+    try:
+        sessions = list_user_sessions(uid)                   # filtered by user_id in SQL
+    except Exception:
+        sessions = []
+        st.warning("Não foi possível carregar suas conversas agora.")
+    if not sessions:
+        st.info("Nenhuma conversa anterior.")
+        return
+    for s in sessions:
+        stype = s.get("sim_type") or s.get("last_sim_type") or "Conversa livre"
+        step = _STEP_LABELS.get(s.get("last_step") or "", "") or "—"
+        current = " · conversa atual" if s["id"] == st.session_state.get("session_id") else ""
+        with st.container(border=True):
+            st.markdown(f"**{str(s.get('started_at'))[:16]}** · {stype}{current}")
+            st.caption(f"Último passo: {step} · {s.get('n_messages', 0)} mensagens")
+            st.button("Abrir", key=f"hist_open_{s['id']}", on_click=_open_conversation,
+                      args=(s["id"],), use_container_width=True)
+
+
+# Sidebar status labels per step (also used by 'Minhas conversas').
+_STEP_LABELS = {
+    "IDLE":             "",
+    "IDLE_LT_CONFIRM":  "Confirmação: dados de LT detectados",
+    "IDLE_LT_NET_CHOICE": "Escolha: rede nova ou caso existente",
+    "NET1_SETUP":   "NET 1: Título e base MVA",
+    "NET2_BUSES":   "NET 2: Barras",
+    "NET3_LINES":   "NET 3: Linhas",
+    "NET4_REVIEW":  "NET 4: Revisão",
+    "NET5_GENERATE": "NET 5: Arquivo PWF",
+    "NET6_RUN":     "NET 6: Carregar no ANAREDE",
+    "NET7_RESULTS": "NET 7: Resultados",
+    "STEP1":  "STEP 1: Base de dados",
+    "STEP2":  "STEP 2: Ano(s)",
+    "STEP3":  "STEP 3: Cenário",
+    "STEP4":  "STEP 4: Carregar SAV",
+    "STEP6":  "STEP 6: Diagrama LST",
+    "STEP7":  "STEP 7: Barra",
+    "STEP8":  "STEP 8: Potência BESS",
+    "STATCOM_STEP_Q":    "STATCOM: Limites reativos",
+    "STATCOM_STEP_CBUS": "STATCOM: Barra controlada",
+    "STEP9":  "STEP 9: Salvar caso",
+    "STEP10": "STEP 10: Rodar fluxo",
+    "STEP11":  "STEP 11: Resultados",
+    "STEP11B": "STEP 11B: Contingências N-1",
+    "STEP12":  "STEP 12: Próximos passos",
+}
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     _user = st.session_state["user"]
@@ -3539,83 +3986,90 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-    _step_labels = {
-        "IDLE":             "",
-        "IDLE_LT_CONFIRM":  "Confirmação: dados de LT detectados",
-        "IDLE_LT_NET_CHOICE": "Escolha: rede nova ou caso existente",
-        "NET1_SETUP":   "NET 1: Título e base MVA",
-        "NET2_BUSES":   "NET 2: Barras",
-        "NET3_LINES":   "NET 3: Linhas",
-        "NET4_REVIEW":  "NET 4: Revisão",
-        "NET5_GENERATE": "NET 5: Arquivo PWF",
-        "NET6_RUN":     "NET 6: Carregar no ANAREDE",
-        "NET7_RESULTS": "NET 7: Resultados",
-        "STEP1":  "STEP 1: Base de dados",
-        "STEP2":  "STEP 2: Ano(s)",
-        "STEP3":  "STEP 3: Cenário",
-        "STEP4":  "STEP 4: Carregar SAV",
-        "STEP6":  "STEP 6: Diagrama LST",
-        "STEP7":  "STEP 7: Barra",
-        "STEP8":  "STEP 8: Potência BESS",
-        "STATCOM_STEP_Q":    "STATCOM: Limites reativos",
-        "STATCOM_STEP_CBUS": "STATCOM: Barra controlada",
-        "STEP9":  "STEP 9: Salvar caso",
-        "STEP10": "STEP 10: Rodar fluxo",
-        "STEP11":  "STEP 11: Resultados",
-        "STEP11B": "STEP 11B: Contingências N-1",
-        "STEP12":  "STEP 12: Próximos passos",
-    }
+    _step_labels = _STEP_LABELS
 
-    if st.session_state.sim_status == "paused":
+    if st.session_state.sim_status in ("active", "paused"):
+        # ── "Estudo atual": progress, collected parameters (✏️), pause/resume ──
+        _sdata = st.session_state.sim_data
+        _stype = _sdata.get("sim_type")
         step_label = _step_labels.get(st.session_state.sim_step, "")
-        st.warning(f"⏸️ Simulação pausada\n{step_label}")
-        col_resume, col_end = st.columns(2)
-        with col_resume:
-            if st.button("▶️ Retomar", use_container_width=True):
-                st.session_state.sim_status = "active"
-                st.session_state.simulation_mode = True
-                try:
-                    clear_paused_state(st.session_state["session_id"])
-                except Exception:
-                    pass
-                last_q = _current_step_question()
-                if last_q:
-                    _append_system_assistant_message(f"Simulação retomada.\n\n{last_q}")
-                st.rerun()
-        with col_end:
-            if st.button("⏹️ Encerrar", use_container_width=True):
-                st.session_state.simulation_mode = False
-                st.session_state.sim_step = "IDLE"
-                st.session_state.sim_data = {}
-                st.session_state.sim_status = None
-                try:
-                    clear_paused_state(st.session_state["session_id"])
-                except Exception:
-                    pass
-                _append_system_assistant_message("Simulação encerrada.")
-                st.rerun()
-    elif st.session_state.sim_status == "active":
-        step_label = _step_labels.get(st.session_state.sim_step, "")
-        st.success(f"🔬 Modo: Guia de Simulação\n{step_label}")
-        if st.button("⏸️ Pausar simulação", use_container_width=True):
-            st.session_state.sim_status = "paused"
-            st.session_state.simulation_mode = False
-            try:
-                save_paused_state(
-                    st.session_state["session_id"],
-                    st.session_state.sim_step,
-                    st.session_state.sim_data,
-                )
-            except Exception:
-                pass
-            _append_system_assistant_message(
-                "Simulação pausada. Você pode fazer perguntas livres.\n\n"
-                "Use o botão **▶️ Retomar** na barra lateral ou digite "
-                "**retomar** para voltar à simulação."
-            )
-            st.rerun()
+        with st.container(border=True):
+            st.markdown("**🔬 Estudo atual**" + (f" · {_stype}" if _stype else ""))
+            _n, _m = _si.progress(_stype, st.session_state.sim_step)
+            if _n:
+                st.progress(_n / _m, text=f"Passo {_n} de {_m} · {step_label}")
+            elif step_label:
+                st.caption(step_label)
+            _editing = (st.session_state.get("_edit_pending") or {}).get("field")
+            for _field, _plabel, _pval in _study_params(_sdata):
+                _c1, _c2 = st.columns([5, 1])
+                with _c1:
+                    st.markdown(f"{_plabel}: **{_pval}**" + (" ✏️" if _editing and _field == _editing else ""))
+                with _c2:
+                    if _field and st.session_state.sim_status == "active":
+                        st.button("✏️", key=f"edit_{_field}", help=f"Alterar {_EDIT_LABELS[_field].lower()}",
+                                  on_click=_start_edit, args=(_field,))
+
+            if st.session_state.sim_status == "paused":
+                st.warning("⏸️ Simulação pausada")
+                col_resume, col_end = st.columns(2)
+                with col_resume:
+                    if st.button("▶️ Retomar", use_container_width=True):
+                        st.session_state.sim_status = "active"
+                        st.session_state.simulation_mode = True
+                        try:
+                            clear_paused_state(st.session_state["session_id"])
+                        except Exception:
+                            pass
+                        last_q = _current_step_question()
+                        if last_q:
+                            _append_system_assistant_message(f"Simulação retomada.\n\n{last_q}")
+                        st.rerun()
+                with col_end:
+                    if st.button("⏹️ Encerrar", use_container_width=True):
+                        st.session_state.simulation_mode = False
+                        st.session_state.sim_step = "IDLE"
+                        st.session_state.sim_data = {}
+                        st.session_state.sim_status = None
+                        st.session_state.pop("_edit_pending", None)
+                        try:
+                            clear_paused_state(st.session_state["session_id"])
+                        except Exception:
+                            pass
+                        _append_system_assistant_message("Simulação encerrada.")
+                        st.rerun()
+            else:
+                if st.button("⏸️ Pausar simulação", use_container_width=True):
+                    st.session_state.sim_status = "paused"
+                    st.session_state.simulation_mode = False
+                    st.session_state.pop("_edit_pending", None)
+                    try:
+                        save_paused_state(
+                            st.session_state["session_id"],
+                            st.session_state.sim_step,
+                            st.session_state.sim_data,
+                        )
+                    except Exception:
+                        pass
+                    _append_system_assistant_message(
+                        "Simulação pausada. Você pode fazer perguntas livres.\n\n"
+                        "Use o botão **▶️ Retomar** na barra lateral ou digite "
+                        "**retomar** para voltar à simulação."
+                    )
+                    st.rerun()
     else:
         st.info("💬 Modo: Conversa Livre")
+
+    st.divider()
+    st.button("🗂️ Minhas conversas", use_container_width=True, on_click=_open_history)
+    st.toggle("🎓 Modo especialista", value=_expert(), key="_ui_mode_toggle",
+              on_change=_on_mode_toggle,
+              help="Especialista: mensagens do guia só com a pergunta e respostas mais diretas. "
+                   "Iniciante: explicações completas e ajuda do glossário.")
+    with st.expander("📖 Glossário"):
+        for _term, _definition in GLOSSARY.items():
+            st.markdown(f"**{_term}** — {_definition}")
+        st.caption(f"Definições em revisão ({GLOSSARY_STATUS}).")
 
     st.divider()
     if st.button("🗑️ Limpar conversa", use_container_width=True):
@@ -3626,6 +4080,7 @@ with st.sidebar:
         st.session_state.sim_status = None
         st.session_state.study = StudyState()
         st.session_state.pop("_links_shown", None)  # links message is gone with the history
+        st.session_state.pop("_edit_pending", None)
         st.session_state.chain = None
         st.session_state.chain_error = None
         clear_study()
@@ -3643,6 +4098,10 @@ with st.sidebar:
     st.caption(APP_VERSION)
 
 # ── Main area ──────────────────────────────────────────────────────────────────
+if st.session_state.get("_view") == "history":
+    _render_history_view()
+    st.stop()
+
 st.markdown("### ⚡ Assistente SIN")
 st.caption("Planejamento e operação do Sistema Interligado Nacional")
 st.divider()
@@ -3844,7 +4303,8 @@ def _process_input(prompt: str, source: str = "typed"):
     """
     # Sim context when the user message ARRIVED (before any state change)
     _step_before, _type_before = _sim_snapshot()
-    _user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
+    _user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id(),
+                 "input_source": source}
     st.session_state.messages.append(_user_msg)
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -3899,8 +4359,15 @@ def _process_input(prompt: str, source: str = "typed"):
             except Exception:
                 pass
 
-    # Try state machine first
-    sim_response = _handle_sim_state(prompt)
+    # ✏️ answer from the study panel, then the state machine
+    _edit_handled, sim_response = False, None
+    if st.session_state.get("_edit_pending"):
+        if st.session_state.sim_status != "active":
+            st.session_state.pop("_edit_pending", None)
+        else:
+            _edit_handled, sim_response = _handle_edit(prompt)
+    if not _edit_handled:
+        sim_response = _handle_sim_state(prompt)
 
     _grounding_info = None
     with st.chat_message("assistant"):
@@ -3922,6 +4389,8 @@ def _process_input(prompt: str, source: str = "typed"):
         else:
             # MODE 1: free technical Q&A via LLM
             study_context = st.session_state.study.summary()
+            if _expert():
+                study_context = f"{study_context}\n\n{_EXPERT_NOTE}"
             full_prompt = prompt
             # If user just declined IDLE_LT_CONFIRM, answer their original question
             _lt_q = st.session_state.get("_lt_confirm_question")
@@ -3956,12 +4425,126 @@ def _process_input(prompt: str, source: str = "typed"):
     save_study(st.session_state.study)
 
 
+# ── Structured input under the latest assistant message (buttons / forms) ─────
+# A click or a valid form queues the CANONICAL TEXT; the next run feeds it to
+# _process_input exactly like a typed message (same handler, shown as a user
+# message, logged to chat_logs with input_source='button' | 'form').
+
+def _queue_input(texts, source):
+    st.session_state["_input_queue"] = {"texts": list(texts), "source": source}
+
+
+def _process_inputs(texts, source):
+    """Process answers in order; stop if one is not accepted (state unchanged)."""
+    for i, text in enumerate(texts):
+        before = (st.session_state.sim_step, copy.deepcopy(st.session_state.sim_data),
+                  st.session_state.sim_status)
+        _process_input(text, source)
+        after = (st.session_state.sim_step, st.session_state.sim_data, st.session_state.sim_status)
+        if i < len(texts) - 1 and before == after:
+            break  # the handler re-asked: never feed the next value to another question
+
+
+def _term_help(term):
+    if not term or _expert():
+        return None
+    return GLOSSARY.get(term)
+
+
+def _current_controls():
+    if st.session_state.get("sim_status") == "paused":
+        return []
+    data = st.session_state.get("sim_data") or {}
+    ep = st.session_state.get("_edit_pending")
+    if ep and st.session_state.get("sim_status") == "active":
+        return _si.controls_for_edit(ep["field"], data, _PARPEL_NAMES, _PDE_NAMES)
+    return _si.controls_for(st.session_state.get("sim_step", "IDLE"), data, _PARPEL_NAMES, _PDE_NAMES)
+
+
+def _render_option_buttons(spec, mid, ci):
+    opts = spec["options"]
+    if not opts:
+        return
+    per_row = len(opts) if len(opts) <= 3 else 2   # columns stack on narrow (mobile) screens
+    for r in range(0, len(opts), per_row):
+        cols = st.columns(per_row)
+        for j, opt in enumerate(opts[r:r + per_row]):
+            with cols[j]:
+                st.button(opt["label"], key=f"opt_{mid}_{ci}_{r + j}", on_click=_queue_input,
+                          args=([opt["text"]], "button"), help=_term_help(opt.get("term")),
+                          use_container_width=True)
+
+
+def _on_form_submit(spec, base, sel_val):
+    raw = {f["key"]: st.session_state.get(f"fld_{base}_{f['key']}")
+           for f in _si.form_fields(spec, sel_val)}
+    errors, texts = _si.compose(spec, raw, sel_val, st.session_state.sim_data)
+    if errors:
+        st.session_state[f"form_err_{base}"] = errors   # shown inline, nothing is sent
+        return
+    st.session_state.pop(f"form_err_{base}", None)
+    _queue_input(texts, "form")
+
+
+def _render_form(spec, mid, ci):
+    base = f"{mid}_{spec['id']}"
+    sel_val = None
+    sel = spec.get("selector")
+    if sel:
+        values = [v for v, _ in sel["options"]]
+        labels = dict(sel["options"])
+        if hasattr(st, "segmented_control"):
+            sel_val = st.segmented_control(sel["label"], values, default=sel["default"],
+                                           format_func=lambda v: labels[v], key=f"sel_{base}")
+        else:
+            sel_val = st.radio(sel["label"], values, index=values.index(sel["default"]),
+                               format_func=lambda v: labels[v], horizontal=True, key=f"sel_{base}")
+        sel_val = sel_val or sel["default"]
+    with st.form(key=f"form_{base}_{sel_val or ''}"):
+        st.markdown(f"**{spec['title']}**")
+        for f in _si.form_fields(spec, sel_val):
+            st.text_input(f["label"] + ("" if f["required"] else " (opcional)"),
+                          key=f"fld_{base}_{f['key']}", placeholder=f["placeholder"] or None,
+                          help=_term_help(f.get("term")))
+        for err in st.session_state.get(f"form_err_{base}", []):
+            st.error(err)
+        st.form_submit_button(spec["submit"], on_click=_on_form_submit,
+                              args=(spec, base, sel_val), use_container_width=True)
+
+
+def _render_controls(msg):
+    """Buttons/forms for the current step (or ✏️ edit) + inline glossary (iniciante)."""
+    mid = msg.get("message_id") or "x"
+    specs = _current_controls()
+    if specs:
+        with st.container():
+            for ci, spec in enumerate(specs):
+                if spec["kind"] == "buttons":
+                    _render_option_buttons(spec, mid, ci)
+                else:
+                    _render_form(spec, mid, ci)
+    if not _expert():
+        terms = _glossary_terms(msg.get("content", ""))
+        if terms:
+            with st.expander("📖 Termos desta mensagem"):
+                for t in terms:
+                    st.markdown(f"**{t}** — {GLOSSARY[t]}")
+
+
 _render_release_notes_banner()
 
 for msg in st.session_state.messages:
     _render_message(msg)
 
 prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
+_queued = st.session_state.pop("_input_queue", None)
 
 if prompt:
-    _process_input(prompt, "typed")
+    _process_inputs([prompt], "typed")
+elif _queued:
+    _process_inputs(_queued["texts"], _queued["source"])
+
+# Options only under the latest assistant message (older messages show none)
+_latest = st.session_state.messages[-1] if st.session_state.messages else None
+if _latest and _latest.get("role") == "assistant" and not _latest.get("welcome"):
+    _render_controls(_latest)

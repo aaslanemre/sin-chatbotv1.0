@@ -214,12 +214,12 @@ check("old items without excerpt/page still group", ux.group_sources([{"source":
 fresh(StreamChain(["R."], [{"source": "docs/a.pdf", "score": 0.80, "excerpt": "e1"},
                            {"source": "docs/a.pdf", "score": 0.77, "excerpt": "e2"},
                            {"source": "docs/b.pdf", "score": 0.76, "excerpt": "e3"}])); run(); run("O que é Y?")
-exps = [e[1] for e in events("expander")]
+exps = [e[1] for e in events("expander") if e[1] not in ("📖 Glossário", "📖 Termos desta mensagem")]
 check("rendered: one expander per file with best score + count", exps == ["a.pdf — 0.80 · 2 trechos", "b.pdf — 0.76 · 1 trecho"], exps)
 check("excerpts shown inside the file entries", any(e[0] == "caption" and "e2" in e[1] for e in EV))
 fresh(StreamChain(["R."], scores(("a.pdf", 0.5), ("a.pdf", 0.4)))); run(); run("O que é Z?")
 check("red: single panel with the best result below the limit",
-      events("expander") == [("expander", "📄 Fontes consultadas")]
+      [e for e in events("expander") if e[1] not in ("📖 Glossário", "📖 Termos desta mensagem")] == [("expander", "📄 Fontes consultadas")]
       and any(e[0] == "caption" and "a.pdf** — 0.50" in e[1] for e in EV))
 
 

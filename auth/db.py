@@ -130,6 +130,9 @@ def init_db():
     cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS grounding_level TEXT;")
     # v6.5.0 — "Novidades da versão" banner (additive; NULL = never dismissed)
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_version TEXT;")
+    # v6.5.0 — beginner/expert mode per user and how each user message was entered
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ui_mode TEXT DEFAULT 'iniciante';")
+    cur.execute("ALTER TABLE chat_logs ADD COLUMN IF NOT EXISTS input_source TEXT;")  # typed | button | form
     conn.commit()
     cur.close()
     conn.close()

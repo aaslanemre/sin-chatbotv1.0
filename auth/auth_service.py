@@ -110,6 +110,24 @@ def set_last_seen_version(user_id: str, version: str) -> bool:
         conn.close()
 
 
+UI_MODES = ("iniciante", "especialista")
+
+
+def set_ui_mode(user_id: str, mode: str) -> bool:
+    """Persist the beginner/expert preference."""
+    if mode not in UI_MODES:
+        raise ValueError(f"ui_mode invalido: {mode}")
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE users SET ui_mode = %s WHERE id = %s::uuid", (mode, user_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        cur.close()
+        conn.close()
+
+
 def get_user_by_id(user_id: str) -> dict | None:
     conn = get_connection()
     cur = get_cursor(conn)
@@ -212,16 +230,19 @@ def manually_verify_user(user_id: str) -> bool:
 
 def log_chat_message(user_id: str, session_id: str, role: str, message: str,
                      sim_step: str = None, message_id: str = None, sim_type: str = None,
-                     grounding_score: float = None, grounding_level: str = None):
+                     grounding_score: float = None, grounding_level: str = None,
+                     input_source: str = None):
+    """input_source (user rows only): 'typed' | 'button' | 'form'."""
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             """INSERT INTO chat_logs (user_id, session_id, role, message, sim_step,
-                                      message_id, sim_type, grounding_score, grounding_level)
-               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s)""",
+                                      message_id, sim_type, grounding_score, grounding_level,
+                                      input_source)
+               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (user_id, session_id, role, message, sim_step, message_id, sim_type,
-             grounding_score, grounding_level),
+             grounding_score, grounding_level, input_source),
         )
         conn.commit()
     finally:
@@ -236,7 +257,7 @@ def get_chat_logs(start_date=None, end_date=None, user_id=None) -> list[dict]:
         query = """
             SELECT cl.id, cl.user_id, u.email, u.full_name, cl.session_id,
                    cl.role, cl.message, cl.sim_step, cl.message_id, cl.sim_type,
-                   cl.grounding_score, cl.grounding_level, cl.created_at
+                   cl.grounding_score, cl.grounding_level, cl.input_source, cl.created_at
             FROM chat_logs cl
             JOIN users u ON cl.user_id = u.id
             WHERE 1=1
@@ -274,7 +295,7 @@ def get_chat_logs_for_sessions(session_ids: list) -> list[dict]:
         cur.execute(
             """SELECT cl.id, cl.user_id, cl.session_id, cl.role, cl.message,
                       cl.sim_step, cl.message_id, cl.sim_type,
-                      cl.grounding_score, cl.grounding_level, cl.created_at
+                      cl.grounding_score, cl.grounding_level, cl.input_source, cl.created_at
                FROM chat_logs cl
                WHERE cl.session_id = ANY(%s::uuid[])
                ORDER BY cl.created_at""",
@@ -286,6 +307,70 @@ def get_chat_logs_for_sessions(session_ids: list) -> list[dict]:
             r["user_id"] = str(r["user_id"])
             r["session_id"] = str(r["session_id"])
         return rows
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── "Minhas conversas" (user-facing; always scoped to the caller's user_id) ──
+
+def list_user_sessions(user_id: str, limit: int = 50) -> list[dict]:
+    """The user's OWN sessions that have messages, newest first."""
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """SELECT s.id, s.started_at, s.last_message_at, s.sim_type,
+                      (SELECT COUNT(*) FROM chat_logs cl
+                        WHERE cl.session_id = s.id AND cl.user_id = s.user_id) AS n_messages,
+                      (SELECT cl.sim_step FROM chat_logs cl
+                        WHERE cl.session_id = s.id AND cl.user_id = s.user_id
+                        ORDER BY cl.created_at DESC LIMIT 1) AS last_step,
+                      (SELECT cl.sim_type FROM chat_logs cl
+                        WHERE cl.session_id = s.id AND cl.user_id = s.user_id
+                          AND cl.sim_type IS NOT NULL
+                        ORDER BY cl.created_at DESC LIMIT 1) AS last_sim_type
+               FROM sessions s
+               WHERE s.user_id = %s::uuid
+                 AND EXISTS (SELECT 1 FROM chat_logs cl
+                              WHERE cl.session_id = s.id AND cl.user_id = s.user_id)
+               ORDER BY s.last_message_at DESC
+               LIMIT %s""",
+            (user_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            r["id"] = str(r["id"])
+        return rows
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_session_messages(user_id: str, session_id: str) -> list[dict]:
+    """
+    Transcript of one session, ONLY if it belongs to `user_id` (enforced in SQL:
+    the session row and every chat row must carry that user id). Returns [] for
+    someone else's session, an unknown id or a malformed id.
+    """
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """SELECT cl.role, cl.message, cl.sim_step, cl.sim_type, cl.input_source,
+                      cl.created_at
+               FROM chat_logs cl
+               JOIN sessions s ON s.id = cl.session_id
+               WHERE cl.session_id = %s::uuid
+                 AND s.user_id = %s::uuid
+                 AND cl.user_id = %s::uuid
+               ORDER BY cl.created_at""",
+            (session_id, user_id, user_id),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        conn.rollback()
+        return []
     finally:
         cur.close()
         conn.close()

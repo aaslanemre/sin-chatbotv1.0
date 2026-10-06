@@ -43,6 +43,7 @@ st.chat_message = lambda *a, **kw: _Ctx()
 st.spinner = lambda *a, **kw: _Ctx()
 st.expander = lambda *a, **kw: _Ctx()
 st.container = lambda *a, **kw: _Ctx()  # v6.5.0 banner
+st.toggle = st.progress = lambda *a, **kw: None  # v6.5.0 sidebar
 st.popover = lambda label, **kw: (calls["popover"].append(label), _Ctx())[1]
 def _form(key=None, **kw):
     calls["form_keys"].append(key); return _Ctx()

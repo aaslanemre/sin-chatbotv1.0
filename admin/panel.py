@@ -26,6 +26,7 @@ from agents.grounding import BADGE_LABELS
 
 
 SECTIONS = ["Visão Geral", "Usuários", "Sessões", "Feedback", "Documentos", "Exportar"]
+INPUT_SOURCE_LABELS = {"typed": "digitado", "button": "botão", "form": "formulário"}
 STATUS_LABELS = {"novo": "🆕 novo", "em_analise": "🔎 em análise",
                  "resolvido": "✅ resolvido", "descartado": "🗑️ descartado"}
 _CATEGORY_KEYS = list(FEEDBACK_CATEGORIES)
@@ -136,7 +137,9 @@ def _render_transcript(sess, messages, feedback, update_fn):
         _bubble(entry["role"], who, entry.get("sim_step"), entry["message"])
         gcap = grounding_caption(entry.get("grounding_level"), entry.get("grounding_score")) \
             if entry["role"] == "assistant" else ""
+        src = INPUT_SOURCE_LABELS.get(entry.get("input_source")) if entry["role"] == "user" else None
         st.caption(f"{entry.get('created_at')} · passo: {entry.get('sim_step') or '-'}"
+                   + (f" · via {src}" if src else "")
                    + (f" · grounding {gcap}" if gcap else ""))
         for fb in fbs:
             _feedback_card(fb, "tr", update_fn)
@@ -762,6 +765,7 @@ def render_admin_panel():
                                 "message": m["message"],
                                 "sim_step": m.get("sim_step"),
                                 "message_id": m.get("message_id"),
+                                "input_source": m.get("input_source"),
                                 "created_at": str(m["created_at"]),
                             }
                             for m in sess_msgs
