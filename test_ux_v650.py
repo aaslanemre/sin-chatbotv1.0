@@ -172,7 +172,7 @@ check("stored/logged text is the full plain text (no separator), main first",
 run("1001")
 m = last_assistant()
 check("mode question: both options visible, explanations in details",
-      "1. **Controle de tensão (barra PV — tipo 2)**" in m["main"] and "2. **Despacho fixo" in m["main"]
+      "1. **Controle de tensão (barra PV — tipo 1)**" in m["main"] and "2. **Despacho fixo" in m["main"]
       and "GFM" in m["details"] and "0.00001 pu" in m["details"])
 check("state machine order unchanged (STEP6 → STEP7 → STEP7 mode)", ss["sim_step"] == "STEP7" and ss["sim_data"]["bess_bus"] == "1001")
 

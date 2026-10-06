@@ -438,7 +438,7 @@ After operating mode selected:
 "Qual a potência nominal da BESS em MVA?
 
 Para o estudo, recomenda-se variar a potência ativa injetada:
-- Comece com +100% (injeção máxima), 0% e -100% (carga)
+- Comece com +100% (injeção máxima) e 0%
 - Para cada valor, verifique convergência e impactos no sistema
 - Ajuste em valores intermediários se necessário
 

@@ -2047,6 +2047,12 @@ def _is_not_converged(text: str) -> bool:
 
 def _parse_bess_mode(text: str):
     t = text.strip().lower()
+    # "1"/"2" are the option numbers; "tipo 1"/"tipo 0" are the DBAR codes shown
+    # in the labels (PQ=0, PV=1).
+    if re.search(r"\btipo\s*0\b", t):
+        return "PQ"
+    if re.search(r"\btipo\s*1\b", t):
+        return "PV"
     if t == "1" or any(w in t for w in ["pv", "tensão", "tensao", "controle", "gfm"]):
         return "PV"
     if t == "2" or any(w in t for w in ["pq", "despacho fixo", "fixo"]):
@@ -2114,8 +2120,8 @@ def _bess_pwf_lines(data: dict) -> str:
 # STEP7 mode question: the options stay visible, the explanations go to "Detalhes".
 _BESS_MODE_QUESTION = (
     "**Qual o modo de operação da BESS?**\n\n"
-    "1. **Controle de tensão (barra PV — tipo 2)**\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 1)**"
+    "1. **Controle de tensão (barra PV — tipo 1)**\n\n"
+    "2. **Despacho fixo (barra PQ — tipo 0)**"
 )
 _BESS_MODE_RECOMMENDATION = (
     "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
@@ -2124,16 +2130,26 @@ _BESS_MODE_RECOMMENDATION = (
 )
 _BESS_MODE_DETAILS = (
     _BESS_MODE_RECOMMENDATION + "\n\n"
-    "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+    "1. **Controle de tensão (barra PV — tipo 1):** recomendado para estudos "
     "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+    "2. **Despacho fixo (barra PQ — tipo 0):** injeção fixa de potência ativa e reativa."
 )
 _BESS_MODE_DETAILS_LONG = (
     _BESS_MODE_RECOMMENDATION + "\n\n"
-    "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+    "1. **Controle de tensão (barra PV — tipo 1):** recomendado para estudos "
     "do SIN, especialmente se o leilão exigir modo GFM. A barra é configurada "
     "com despacho fixo de potência ativa e tensão-alvo que a BESS tentará controlar.\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+    "2. **Despacho fixo (barra PQ — tipo 0):** injeção fixa de potência ativa e reativa."
+)
+
+# STEP8 recommendation shown under the MVA question. The form keeps 0 ≤ P ≤ S.
+# PENDING EXPERT DECISION: charging BESS as negative Pg or as load (Pl).
+# Until a domain expert confirms how charging is represented in the DBAR, do not
+# suggest negative active power (e.g. "-100% (carga)") here.
+_BESS_P_RECOMMENDATION = (
+    "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
+    "- Comece com +100% (injeção máxima) e 0%\n"
+    "- Para cada valor, verifique convergência e impactos no sistema"
 )
 
 _BESS_AMARELO_NOTE = (
@@ -2329,11 +2345,7 @@ def _current_step_question() -> str:
         )
     if step == "STEP7":
         if sim_type == "BESS" and "bess_bus" in data:
-            return (
-                "**Qual o modo de operação da BESS?**\n\n"
-                "1. **Controle de tensão (barra PV — tipo 2)**\n\n"
-                "2. **Despacho fixo (barra PQ — tipo 1)**"
-            )
+            return _BESS_MODE_QUESTION
         return f"Qual é a barra onde deseja inserir o {device_label}?"
     if step == "STEP8":
         if "bess_mva" not in data:
@@ -2386,6 +2398,30 @@ def _current_step_question() -> str:
     return ""
 
 
+_NEXT_STEPS_TEXT = (
+    "**Próximos passos recomendados:**\n\n"
+    "1. Repetir esta simulação para outros patamares de carga e geração "
+    "(máxima noturna, mínima noturna, etc.)\n"
+    "2. Testar em outros anos do período escolhido\n"
+    "3. Simular contingências N-1 (desligamento de linhas e geradores) "
+    "na região de estudo\n"
+    "4. Após validar em regime permanente com ANAREDE, testar a solução "
+    "no ANATEM para verificar o desempenho dinâmico\n\n"
+    "Deseja continuar com outro cenário ou patamar de carga?"
+)
+
+# End verb + "contingência(s)": leaves the N-1 sub-flow (STEP11B) only. Plain
+# "encerrar" keeps ending the whole simulation.
+_CONTINGENCY_EXIT_RE = re.compile(
+    r"\b(?:encerra\w*|finaliza\w*|termina\w*|sair|fim)\b.*\bconting[eê]ncias?\b",
+    re.IGNORECASE,
+)
+
+
+def _is_contingency_exit(text: str) -> bool:
+    return bool(_CONTINGENCY_EXIT_RE.search(text))
+
+
 def _handle_sim_state(user_text: str) -> str | None:
     """
     Drive the simulation state machine.
@@ -2427,7 +2463,8 @@ def _handle_sim_state(user_text: str) -> str | None:
     # ── Global: encerrar / restart checks (before any step logic) ─────────────
     t_lower = user_text.lower()
     _ENCERRAR = ["encerrar", "finalizar", "terminar", "fim", "sair", "encerra", "finaliza"]
-    if step not in ("IDLE", "STEP12") and any(s in t_lower for s in _ENCERRAR):
+    if (step not in ("IDLE", "STEP12") and any(s in t_lower for s in _ENCERRAR)
+            and not (step == "STEP11B" and _is_contingency_exit(user_text))):
         st.session_state.simulation_mode = False
         st.session_state.sim_step = "IDLE"
         st.session_state.sim_data = {}
@@ -2677,6 +2714,13 @@ def _handle_sim_state(user_text: str) -> str | None:
         sim_type = data.get("sim_type", "BESS")
         device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
 
+        # Device kept from a previous year (STEP12 year change): no new questions,
+        # regenerate the block for the newly loaded case (post-PWF path of
+        # _device_change_reply: BESS → DBAR/DLIN + STEP9, STATCOM → STATCOM_STEP_CBUS).
+        if _device_complete(data):
+            return converged_prefix + _device_change_reply(
+                "Parâmetros mantidos da simulação anterior.", "STEP9")
+
         # If bus number provided, skip straight to STEP7 — BESS only
         if sim_type == "BESS" and ctx["bus_number"] is not None:
             data["bess_bus"] = ctx["bus_number"]
@@ -2883,9 +2927,7 @@ def _handle_sim_state(user_text: str) -> str | None:
                     f"Barra selecionada: **{bus}** e modo **{mode_label}** identificados.\n\n"
                     "**Qual a potência nominal da BESS em MVA?**"
                     + _ux.DETAILS_SEP
-                    + "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
-                    "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
-                    "- Para cada valor, verifique convergência e impactos no sistema"
+                    + _BESS_P_RECOMMENDATION
                     + _ux.DETAILS_SEP
                     + "Os limites de potência reativa serão calculados automaticamente: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
@@ -2931,9 +2973,7 @@ def _handle_sim_state(user_text: str) -> str | None:
                 f"Modo selecionado: **{mode_label}**.\n\n"
                 "**Qual a potência nominal da BESS em MVA?**"
                 + _ux.DETAILS_SEP
-                + "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
-                "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
-                "- Para cada valor, verifique convergência e impactos no sistema"
+                + _BESS_P_RECOMMENDATION
                 + _ux.DETAILS_SEP
                 + "Os limites de potência reativa serão calculados automaticamente: "
                 "Q_max = √(S² − P²), Q_min = −Q_max"
@@ -3129,6 +3169,13 @@ def _handle_sim_state(user_text: str) -> str | None:
         t = user_text.lower()
         stage = st.session_state.sim_data.get("contingency_stage")
 
+        # "encerrar contingências" ends only this sub-flow — same as the
+        # "Seguir para os próximos passos" button — at any stage.
+        if _is_contingency_exit(user_text):
+            st.session_state.sim_data.pop("contingency_stage", None)
+            st.session_state.sim_step = "STEP12"
+            return _NEXT_STEPS_TEXT
+
         # ── Sub-state: waiting for yes/no (stage not yet set) ─────────────────
         if stage is None:
             if any(kw in t for kw in ["sim", "quero", "gostaria", "contingência",
@@ -3150,17 +3197,7 @@ def _handle_sim_state(user_text: str) -> str | None:
                 )
             if any(kw in t for kw in ["não", "nao", "pular", "skip"]):
                 st.session_state.sim_step = "STEP12"
-                return (
-                    "**Próximos passos recomendados:**\n\n"
-                    "1. Repetir esta simulação para outros patamares de carga e geração "
-                    "(máxima noturna, mínima noturna, etc.)\n"
-                    "2. Testar em outros anos do período escolhido\n"
-                    "3. Simular contingências N-1 (desligamento de linhas e geradores) "
-                    "na região de estudo\n"
-                    "4. Após validar em regime permanente com ANAREDE, testar a solução "
-                    "no ANATEM para verificar o desempenho dinâmico\n\n"
-                    "Deseja continuar com outro cenário ou patamar de carga?"
-                )
+                return _NEXT_STEPS_TEXT
             return (
                 "Deseja realizar análise de contingências N-1? "
                 "Responda **Sim** ou **Não**."
@@ -3263,19 +3300,10 @@ def _handle_sim_state(user_text: str) -> str | None:
                     "- `linha XXXX-YYYY circuito N`\n"
                     "- `gerador barra XXXXX`"
                 )
-            # Default (encerrar / anything else) → next steps
+            # Default ("Seguir para os próximos passos" / anything else) → next steps
+            st.session_state.sim_data.pop("contingency_stage", None)
             st.session_state.sim_step = "STEP12"
-            return (
-                "**Próximos passos recomendados:**\n\n"
-                "1. Repetir esta simulação para outros patamares de carga e geração "
-                "(máxima noturna, mínima noturna, etc.)\n"
-                "2. Testar em outros anos do período escolhido\n"
-                "3. Simular contingências N-1 (desligamento de linhas e geradores) "
-                "na região de estudo\n"
-                "4. Após validar em regime permanente com ANAREDE, testar a solução "
-                "no ANATEM para verificar o desempenho dinâmico\n\n"
-                "Deseja continuar com outro cenário ou patamar de carga?"
-            )
+            return _NEXT_STEPS_TEXT
 
         # ── Sub-state: awaiting N-1 results report ─────────────────────────────
         if stage == "awaiting_results":
@@ -3353,18 +3381,28 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_status = "active"
             return _ux.with_details(_STEP1_DB_QUESTION, _STEP1_DB_RECOMMENDATION)
 
-        # BUG 2b — New year (2026–2040) → restart from STEP3 keeping same database
+        # BUG 2b — New year (2026–2040): same as the ✏️ year edit — keep the
+        # scenario and the device parameters, load the new year's case (STEP4).
         new_years = _parse_years(user_text)
         if new_years and all(2026 <= y <= 2040 for y in new_years):
             data["years"] = new_years
             data["year_idx"] = 0
-            data.pop("scenario", None)
-            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode"]:
-                data.pop(key, None)
-            st.session_state.sim_step = "STEP3"
+            data.pop("contingency_stage", None)
+            data.pop("divergence_color", None)
             years_str = ", ".join(str(y) for y in new_years)
-            scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
-            return f"Ano(s) atualizado(s): **{years_str}**.\n\n{scenarios}"
+            scenario = data.get("scenario")
+            if scenario is None:
+                st.session_state.sim_step = "STEP3"
+                scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
+                return f"Ano(s) atualizado(s): **{years_str}**.\n\n{scenarios}"
+            data["year"] = new_years[0]
+            st.session_state.sim_step = "STEP4"
+            kept = _kept_device_line(data)
+            return (
+                f"Ano(s) atualizado(s): **{years_str}**. Cenário mantido: **{scenario}**.\n\n"
+                + (f"{kept}\n\n" if kept else "")
+                + _sav_filename_hint(db, scenario, new_years[0])
+            )
 
         # BUG 2c — Mode/power input → resume BESS config from STEP7 or STEP8
         ctx12 = extract_sim_context(user_text)
@@ -3639,6 +3677,26 @@ def _case_change_note(step):
                 "(Histórico > Operações > Restabelecer) antes de continuar.")
     q = _current_step_question()
     return note + (f"\n\n{q}" if q else "")
+
+
+def _device_complete(data):
+    if data.get("sim_type") == "STATCOM":
+        return all(k in data for k in ("statcom_bus", "statcom_q_min", "statcom_q_max"))
+    return all(k in data for k in ("bess_bus", "bess_mode", "bess_mva", "bess_p_mw", "bess_bus_number"))
+
+
+def _kept_device_line(data):
+    """One confirmation line with the device parameters kept across a year change."""
+    if not _device_complete(data):
+        return ""
+    if data.get("sim_type") == "STATCOM":
+        vals = (f"barra **{data['statcom_bus']}**, "
+                f"Qmin **{_si.fmt_num(data['statcom_q_min'])} Mvar**, "
+                f"Qmax **{_si.fmt_num(data['statcom_q_max'])} Mvar**")
+    else:
+        vals = (f"barra **{data['bess_bus']}**, modo **{data['bess_mode']}**, "
+                f"**{data['bess_mva']} MVA**, P = **{data['bess_p_mw']} MW**")
+    return f"Mantendo {vals} — confirme ou use ✏️ para editar."
 
 
 def _device_change_reply(msg, step):

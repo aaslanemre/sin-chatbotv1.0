@@ -112,6 +112,7 @@ def _form(fid, title, fields=None, submit="Enviar", selector=None, fields_by=Non
 F_YEARS = _f("years", "Ano(s)", "text", placeholder="ex: 2028 ou 2027, 2028")
 F_BUS = _f("bus", "Número da barra", "int", 10, 99999, placeholder="ex: 1001")
 F_MVA = _f("mva", "Potência nominal (MVA)", "float", 0.000001, 100000, term="MVA")
+# 0 ≤ P ≤ S. PENDING EXPERT DECISION: charging BESS as negative Pg or as load (Pl).
 F_P = _f("p", "Potência ativa (MW)", "float", 0, 100000, placeholder="0 a S")
 F_NEW_BUS = _f("bus", "Número da nova barra da BESS", "int", 1000, 99999,
                placeholder="número que não existe no caso")
