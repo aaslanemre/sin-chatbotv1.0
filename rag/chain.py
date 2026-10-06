@@ -36,6 +36,13 @@ class SINChain:
     Interface: chain.invoke({"question": ..., "study_context": ...})
                → {"answer": ..., "source_documents": [...],
                   "retrieval_scores": [{"source": ..., "score": ...}, ...]}
+
+    Streaming (v6.5.0) splits the same work into steps so the app can show the
+    grounding badge before generation starts:
+        retrieved = chain.retrieve(question)          # the ONE search
+        for text in chain.stream(inputs, retrieved):  # or chain.generate(...)
+            ...
+        chain.remember(question, answer)
     """
 
     def __init__(self):
@@ -49,41 +56,66 @@ class SINChain:
             ("human", "{question}"),
         ])
 
-    def invoke(self, inputs: dict) -> dict:
-        question = inputs["question"]
-        study_context = inputs.get("study_context", "No study context defined yet.")
-
+    def retrieve(self, question: str) -> dict:
         # ONE search returning documents and scores. Same query, same k (TOP_K) and
         # same ranking as as_retriever(search_kwargs={"k": TOP_K}), whose default
         # "similarity" mode calls similarity_search_with_score and drops the scores.
         scored = self.vectorstore.similarity_search_with_score(question, k=TOP_K)
         docs = [doc for doc, _ in scored]
-        retrieval_scores = [
-            {"source": doc.metadata.get("source", "desconhecido"), "score": float(score)}
-            for doc, score in scored
-        ]
-        context = "\n\n".join(doc.page_content for doc in docs)
+        retrieval_scores = []
+        for doc, score in scored:
+            item = {"source": doc.metadata.get("source", "desconhecido"), "score": float(score),
+                    "excerpt": (doc.page_content or "")[:400]}
+            if doc.metadata.get("page") is not None:
+                item["page"] = doc.metadata["page"]
+            retrieval_scores.append(item)
+        return {
+            "docs": docs,
+            "retrieval_scores": retrieval_scores,
+            "context": "\n\n".join(doc.page_content for doc in docs),
+        }
 
-        messages = self._prompt.format_messages(
-            study_context=study_context,
-            context=context,
+    def _messages(self, inputs: dict, retrieved: dict):
+        return self._prompt.format_messages(
+            study_context=inputs.get("study_context", "No study context defined yet."),
+            context=retrieved["context"],
             chat_history=self.chat_history,
-            question=question,
+            question=inputs["question"],
         )
 
-        response = self.llm.invoke(messages)
-        answer = response.content
+    @staticmethod
+    def _text(content) -> str:
+        if isinstance(content, list):  # some providers return content parts
+            return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+        return content or ""
 
-        # Update rolling window (max 10 turns = 20 messages)
+    def generate(self, inputs: dict, retrieved: dict) -> str:
+        """Non-streaming generation over already-retrieved context."""
+        return self._text(self.llm.invoke(self._messages(inputs, retrieved)).content)
+
+    def stream(self, inputs: dict, retrieved: dict):
+        """Yield answer text chunks over already-retrieved context."""
+        for chunk in self.llm.stream(self._messages(inputs, retrieved)):
+            text = self._text(getattr(chunk, "content", chunk))
+            if text:
+                yield text
+
+    def remember(self, question: str, answer: str):
+        """Update rolling window (max 10 turns = 20 messages)."""
         self.chat_history.append(HumanMessage(content=question))
         self.chat_history.append(AIMessage(content=answer))
         if len(self.chat_history) > 20:
             self.chat_history = self.chat_history[-20:]
 
+    def invoke(self, inputs: dict) -> dict:
+        question = inputs["question"]
+        retrieved = self.retrieve(question)
+        answer = self.generate(inputs, retrieved)
+        self.remember(question, answer)
         return {
             "answer": answer,
-            "source_documents": docs,
-            "retrieval_scores": retrieval_scores,
+            "source_documents": retrieved["docs"],
+            "retrieval_scores": retrieved["retrieval_scores"],
         }
 
 

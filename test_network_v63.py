@@ -53,6 +53,7 @@ _st_mod.columns  = lambda n, **kw: [_CtxMgr() for _ in range(n if isinstance(n, 
 _st_mod.chat_message = lambda *a, **kw: _CtxMgr()
 _st_mod.spinner      = lambda *a, **kw: _CtxMgr()
 _st_mod.expander     = lambda *a, **kw: _CtxMgr()
+_st_mod.container    = lambda *a, **kw: _CtxMgr()  # v6.5.0 banner
 sys.modules["streamlit"] = _st_mod
 
 # ── Stub heavy dependencies ───────────────────────────────────────────────────

@@ -32,14 +32,17 @@ script = {"rating": None, "category": None, "comment": "", "submit": False, "pro
 st = types.ModuleType("streamlit")
 st.session_state = ss
 for n in ["set_page_config", "stop", "error", "tabs", "form_submit_button_", "text_input", "spinner",
-          "expander", "caption", "divider", "button", "info", "success", "warning", "rerun"]:
+          "expander", "caption", "divider", "info", "success", "warning", "rerun"]:
     setattr(st, n, lambda *a, **kw: None)
+calls["button_keys"] = []
+st.button = lambda *a, **kw: calls["button_keys"].append(kw.get("key")) and None  # v6.5.0: 👍/👎 fallback buttons
 st.markdown = lambda *a, **kw: calls["markdown"].append(a[0] if a else "")
 st.sidebar = _Ctx()
 st.columns = lambda n, **kw: [_Ctx() for _ in range(n if isinstance(n, int) else len(n))]
 st.chat_message = lambda *a, **kw: _Ctx()
 st.spinner = lambda *a, **kw: _Ctx()
 st.expander = lambda *a, **kw: _Ctx()
+st.container = lambda *a, **kw: _Ctx()  # v6.5.0 banner
 st.popover = lambda label, **kw: (calls["popover"].append(label), _Ctx())[1]
 def _form(key=None, **kw):
     calls["form_keys"].append(key); return _Ctx()
@@ -174,7 +177,7 @@ fresh_state()
 env = run_app()
 make, render_widget = env["_make_assistant_message"], env["_render_feedback_widget"]
 VERSION = env["APP_VERSION"]
-check("APP_VERSION constant is set (single source)", VERSION == "v6.4.1")
+check("APP_VERSION constant is set (single source)", VERSION == "v6.5.0")
 
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n═══ 2. submit leaves simulation state untouched ═══\n")
@@ -192,13 +195,17 @@ def exercise(label, step, data, status, sim_mode):
     def boom(*a, **kw): raise AssertionError("chat pipeline must not run on feedback submit")
     env["_handle_sim_state"].__globals__["_handle_sim_state"] = boom
     before, nmsg, nlog = snapshot(), len(ss.messages), len(logged)
-    script.update(rating="👎", category="passo", comment="não entendi", submit=True)
+    # v6.5.0: one click on 👎 records the rating, then the optional comment form
+    env["_record_rating"](msg, "down")
+    script.update(category="passo", comment="não entendi", submit=True)
     env["_render_feedback_widget"](msg)
     after = snapshot()
     check(f"{label}: sim_step/sim_data/sim_status/mode identical", before == after, (before, after))
     check(f"{label}: no new messages, no chat_logs rows, pipeline not run", len(ss.messages) == nmsg and len(logged) == nlog)
-    check(f"{label}: feedback saved + thanks toast + ✅ state", len(submitted) == 1 and "Obrigado pelo feedback!" in calls["toast"]
-          and msg["message_id"] in ss["_feedback_cache"])
+    check(f"{label}: feedback saved (click, then comment on the same message) + thanks toast + ✅ state",
+          len(submitted) == 2 and all(a[2] == msg["message_id"] for a in submitted)
+          and submitted[-1][3:6] == ("down", "passo", "não entendi")
+          and "Obrigado pelo feedback!" in calls["toast"] and msg["message_id"] in ss["_feedback_cache"])
     check(f"{label}: snapshot carries version/step/type/user msg",
           submitted[0][11] == VERSION and submitted[0][7] == "2028" and submitted[0][8] == data["sim_type"] and submitted[0][2] == msg["message_id"], submitted[0])
 
@@ -233,19 +240,21 @@ check("user row logs step on arrival (IDLE); assistant row logs step after (STEP
 check("sim_step populated on EVERY chat_logs row", all(r["sim_step"] for r in logged), logged)
 
 # reruns / history replay keep ids and render one widget per non-welcome assistant
-calls["popover"].clear()
+calls["popover"].clear(); calls["button_keys"].clear()
 run_app(); run_app()
 check("ids unchanged after reruns", [m.get("message_id") for m in ss.messages[1:]] == ids)
 n_assist = len(assistants)
-check("welcome has no feedback popover; every other assistant message has one",
-      len(calls["popover"]) == 2 * n_assist and set(calls["popover"]) == {"💬 Deixar feedback"}, (len(calls["popover"]), n_assist))
+_thumbs = [k for k in calls["button_keys"] if k and k.startswith("fb_up_")]
+check("welcome has no 👍/👎; every other assistant message has them (always visible)",
+      len(_thumbs) == 2 * n_assist and not any(welcome.get("message_id") and welcome["message_id"] in k for k in _thumbs),
+      (len(_thumbs), n_assist))
 legacy = {"role": "assistant", "content": "antiga"}
 ss.messages.append(legacy)
 run_app()
 _first = legacy.get("message_id")
 run_app()
 check("history message without id gets one once and keeps it", _first and legacy["message_id"] == _first)
-check("widget keys derive from message_id", any(k and k.startswith("fb_form_") and legacy["message_id"] in k for k in calls["form_keys"]))
+check("widget keys derive from message_id", any(k and k.startswith("fb_up_") and legacy["message_id"] in k for k in calls["button_keys"]))
 
 # pause / resume sidebar-type messages also get ids and are logged
 fresh_state(); env = run_app()
@@ -259,9 +268,8 @@ fresh_state(); env = run_app()
 msg = env["_make_assistant_message"]("x", user_message="y")
 ss.messages.append(msg)
 fail["submit"] = True
-script.update(rating="👍", submit=True)
 try:
-    env["_render_feedback_widget"](msg); crashed = False
+    env["_record_rating"](msg, "up"); env["_render_feedback_widget"](msg); crashed = False
 except Exception as e:
     crashed = True
 check("submit_feedback DB error: no exception, friendly toast, no ✅ state",

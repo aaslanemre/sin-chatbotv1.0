@@ -35,6 +35,7 @@ st.columns = lambda n, **kw: [_Ctx() for _ in range(n if isinstance(n, int) else
 st.chat_message = lambda *a, **kw: _Ctx()
 st.spinner = lambda *a, **kw: _Ctx()
 st.expander = lambda *a, **kw: _Ctx()
+st.container = lambda *a, **kw: _Ctx()  # v6.5.0 banner
 st.popover = lambda *a, **kw: _Ctx()
 st.form = lambda *a, **kw: _Ctx()
 st.radio = lambda l, opts, index=None, **kw: script["rating"] or (opts[index] if index is not None else None)
@@ -171,8 +172,9 @@ SC = lambda v: [{"source": "docs/manual_anarede.pdf", "score": v}, {"source": "d
 
 # ═══ 5. disclosure only for red ═══
 print("\n═══ badges and disclosure on free RAG answers ═══\n")
-for score, level, badge in [(0.80, "green", "🟢 Grounded"), (0.70, "yellow", "🟡 Parcialmente fundamentado"),
-                            (0.50, "red", "🔴 Sem base documental")]:
+for score, level, badge in [(0.80, "green", "🟢 Baseado nos documentos"),
+                            (0.70, "yellow", "🟡 Parcialmente baseado nos documentos"),
+                            (0.50, "red", "🔴 Conhecimento geral")]:  # v6.5.0 PT-BR labels
     fresh(FakeChain("O STATCOM é um dispositivo FACTS.", SC(score)))
     run(); run("O que é um STATCOM?")
     m = last_assistant()
@@ -255,8 +257,10 @@ run(); run("o que é uma barra PQ?")
 m = last_assistant()
 before = copy.deepcopy({k: ss[k] for k in ("sim_step", "sim_data", "sim_status", "simulation_mode")})
 nmsg = len(ss.messages)
-script.update(rating="👎", category="tecnico", comment="errado", submit=True, prompt=None)
-run()  # rerun with the form submitted
+env = run()
+env["_record_rating"](m, "down")  # v6.5.0 one-click 👎 (widget callback)
+script.update(category="tecnico", comment="errado", submit=True, prompt=None)
+run()  # rerun with the optional comment form submitted
 after = {k: ss[k] for k in ("sim_step", "sim_data", "sim_status", "simulation_mode")}
 check("feedback submit leaves sim_step/sim_data/sim_status/mode identical, no new messages",
       before == after and len(ss.messages) == nmsg, (before, after))

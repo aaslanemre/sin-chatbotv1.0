@@ -94,6 +94,22 @@ def login(email: str, password: str) -> dict | None:
 
 # ── User management ──────────────────────────────────────────────────────────
 
+def set_last_seen_version(user_id: str, version: str) -> bool:
+    """Record that the user dismissed the release notes for `version`."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET last_seen_version = %s WHERE id = %s::uuid",
+            (version, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        cur.close()
+        conn.close()
+
+
 def get_user_by_id(user_id: str) -> dict | None:
     conn = get_connection()
     cur = get_cursor(conn)

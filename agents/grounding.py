@@ -14,11 +14,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_HIGH = 0.75
 DEFAULT_LOW = 0.65
 
+# Display labels (v6.5.0, PT-BR). The level KEYS stay green/yellow/red so stored
+# rows (chat_logs.grounding_level, feedback.grounding_level) remain consistent.
 BADGE_LABELS = {
-    "green": "🟢 Grounded",
-    "yellow": "🟡 Parcialmente fundamentado",
-    "red": "🔴 Sem base documental",
+    "green": "🟢 Baseado nos documentos",
+    "yellow": "🟡 Parcialmente baseado nos documentos",
+    "red": "🔴 Conhecimento geral",
 }
+
+BADGE_HELP = (
+    "Indica a relevância dos documentos encontrados, "
+    "não garante que a resposta esteja correta."
+)
 
 DISCLOSURE = (
     "Não encontrei essa informação específica nos documentos — "

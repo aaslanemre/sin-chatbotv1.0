@@ -128,6 +128,8 @@ def init_db():
     """)
     cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS grounding_score REAL;")
     cur.execute("ALTER TABLE feedback ADD COLUMN IF NOT EXISTS grounding_level TEXT;")
+    # v6.5.0 — "Novidades da versão" banner (additive; NULL = never dismissed)
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_version TEXT;")
     conn.commit()
     cur.close()
     conn.close()

@@ -22,6 +22,7 @@ from agents.session_analysis import (
     summarize_session,
     timeline_text,
 )
+from agents.grounding import BADGE_LABELS
 
 
 SECTIONS = ["Visão Geral", "Usuários", "Sessões", "Feedback", "Documentos", "Exportar"]
@@ -445,7 +446,7 @@ def render_admin_panel():
         g_rows = grounding_vs_rating(every)
         if g_rows:
             st.dataframe(pd.DataFrame([{
-                "Nível": f"{LEVEL_ICONS[r['level']]} {r['level']}",
+                "Nível": BADGE_LABELS.get(r["level"], f"{LEVEL_ICONS.get(r['level'], '')} {r['level']}"),
                 "👍": r["up"], "👎": r["down"],
                 "Score médio 👍": r["avg_up"], "Score médio 👎": r["avg_down"],
             } for r in g_rows]), use_container_width=True, hide_index=True)

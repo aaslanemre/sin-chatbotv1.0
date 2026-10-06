@@ -16,9 +16,10 @@ from agents.network_builder import (
 from memory.session_memory import StudyState
 from memory.persistent_memory import load_study, save_study, clear_study
 from auth.db import init_db
-from config.version import APP_VERSION
+from config.version import APP_VERSION, RELEASE_NOTES
 from agents.session_analysis import FEEDBACK_CATEGORIES
 from agents import grounding as _grounding
+from agents import ux as _ux
 try:
     from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
 except ImportError:  # settings needs python-dotenv; keep the app importable without it
@@ -168,18 +169,32 @@ def _sim_snapshot() -> tuple:
 
 
 def _make_assistant_message(content, *, sources=None, user_message=None,
-                            step_before=None, type_before=None, grounding=None) -> dict:
-    """Assistant message dict with a stable id and the sim context for feedback/analysis."""
+                            step_before=None, type_before=None, grounding=None,
+                            deterministic=False) -> dict:
+    """Assistant message dict with a stable id and the sim context for feedback/analysis.
+
+    `content` may carry the "Detalhes" separator (deterministic step messages):
+    the stored/logged text is the full plain text, and the split is kept in
+    `main` / `details` for rendering.
+    """
     step_after, type_after = _sim_snapshot()
+    main, details = _ux.split_details(content)
     msg = {
         "role": "assistant",
-        "content": content,
+        "content": _ux.plain_text(content),
         "message_id": _new_message_id(),
         "sim_type": type_after or type_before,
         "sim_step_before": step_before if step_before is not None else step_after,
         "sim_step_after": step_after,
         "user_message": user_message,
     }
+    if details:
+        msg["main"], msg["details"] = main, details
+    if deterministic:
+        msg["deterministic"] = True  # state-machine text: may carry generated PWF blocks
+        if msg["sim_type"] == "NETWORK":
+            msg["pwf_title"] = ((st.session_state.get("sim_data") or {})
+                                .get("network", {}).get("title"))
     if sources is not None:
         msg["sources"] = sources
     if grounding:  # only free-conversation RAG answers carry grounding data
@@ -210,7 +225,8 @@ def _log_message(msg: dict, step=None, sim_type=None):
 def _append_system_assistant_message(content):
     """Assistant message produced outside the chat pipeline (sidebar buttons, resume)."""
     step, stype = _sim_snapshot()
-    msg = _make_assistant_message(content, step_before=step, type_before=stype)
+    msg = _make_assistant_message(content, step_before=step, type_before=stype,
+                                  deterministic=True)
     st.session_state.messages.append(msg)
     _log_message(msg)
     return msg
@@ -253,45 +269,71 @@ def _submit_feedback_for(msg: dict, rating: str, category, comment: str) -> bool
     return True
 
 
+_FB_FAIL = "Não foi possível enviar o feedback agora. Tente novamente em instantes."
+
+
+def _record_rating(msg: dict, rating: str):
+    """One-click 👍/👎 (widget callback). Upserts the row, keeping any comment already sent."""
+    prev = _feedback_cache().get(msg["message_id"]) or {}
+    if _submit_feedback_for(msg, rating, prev.get("category"), prev.get("comment") or ""):
+        st.toast("Obrigado pelo feedback!")
+    else:
+        st.toast(_FB_FAIL)
+
+
+def _on_thumbs_change(msg: dict, key: str):
+    val = st.session_state.get(key)
+    if val is None:      # un-selecting keeps the rating already recorded
+        return
+    _record_rating(msg, "up" if val == 1 else "down")
+
+
 def _render_feedback_widget(msg: dict):
-    """Compact '💬 Deixar feedback' popover under an assistant message."""
+    """👍/👎 always visible under an assistant message; after 👎, optional details."""
     if msg.get("role") != "assistant" or msg.get("welcome"):
         return
     if not msg.get("message_id"):
         msg["message_id"] = _new_message_id()
     mid = msg["message_id"]
     existing = _feedback_cache().get(mid)
+    rating = (existing or {}).get("rating")
 
-    _ratings = {"👍": "up", "👎": "down"}
-    _cat_keys = [None] + list(FEEDBACK_CATEGORIES)
-    with st.popover("💬 Deixar feedback"):
-        with st.form(key=f"fb_form_{mid}"):
-            _icons = list(_ratings)
-            _idx = None
-            if existing and existing.get("rating") in _ratings.values():
-                _idx = 0 if existing["rating"] == "up" else 1
-            choice = st.radio("Avaliação", _icons, index=_idx, horizontal=True,
-                              key=f"fb_rating_{mid}")
-            _cidx = _cat_keys.index(existing["category"]) if (
-                existing and existing.get("category") in _cat_keys) else 0
-            category = st.selectbox(
-                "Categoria (opcional para 👍)", _cat_keys, index=_cidx,
-                format_func=lambda k: "—" if k is None else FEEDBACK_CATEGORIES[k],
-                key=f"fb_cat_{mid}",
-            )
-            comment = st.text_area(
-                "Comentário", value=(existing or {}).get("comment") or "",
-                key=f"fb_comment_{mid}",
-            )
-            sent = st.form_submit_button("Enviar")
+    if hasattr(st, "feedback"):
+        key = f"fb_thumbs_{mid}"
+        if key not in st.session_state and rating in ("up", "down"):
+            st.session_state[key] = 1 if rating == "up" else 0
+        st.feedback("thumbs", key=key, on_change=_on_thumbs_change, args=(msg, key))
+    else:  # older Streamlit: two small buttons, same one-click behaviour
+        c_up, c_down, _ = st.columns([1, 1, 6])
+        with c_up:
+            st.button("👍", key=f"fb_up_{mid}", on_click=_record_rating, args=(msg, "up"),
+                      type="primary" if rating == "up" else "secondary")
+        with c_down:
+            st.button("👎", key=f"fb_down_{mid}", on_click=_record_rating, args=(msg, "down"),
+                      type="primary" if rating == "down" else "secondary")
 
-    if sent:
-        if choice not in _ratings:
-            st.toast("Escolha 👍 ou 👎 antes de enviar.")
-        elif _submit_feedback_for(msg, _ratings[choice], category, (comment or "").strip()):
-            st.toast("Obrigado pelo feedback!")
-        else:
-            st.toast("Não foi possível enviar o feedback agora. Tente novamente em instantes.")
+    if rating == "down":
+        _cat_keys = [None] + list(FEEDBACK_CATEGORIES)
+        _box = st.popover if hasattr(st, "popover") else st.expander
+        with _box("✍️ Contar o que deu errado (opcional)"):
+            with st.form(key=f"fb_form_{mid}"):
+                _cidx = _cat_keys.index(existing["category"]) if (
+                    existing.get("category") in _cat_keys) else 0
+                category = st.selectbox(
+                    "Categoria", _cat_keys, index=_cidx,
+                    format_func=lambda k: "—" if k is None else FEEDBACK_CATEGORIES[k],
+                    key=f"fb_cat_{mid}",
+                )
+                comment = st.text_area(
+                    "Comentário", value=existing.get("comment") or "",
+                    key=f"fb_comment_{mid}",
+                )
+                sent = st.form_submit_button("Salvar")
+        if sent:
+            if _submit_feedback_for(msg, "down", category, (comment or "").strip()):
+                st.toast("Obrigado pelo feedback!")
+            else:
+                st.toast(_FB_FAIL)
     if mid in _feedback_cache():
         st.caption("✅ Feedback enviado")
 
@@ -310,7 +352,11 @@ def _grounding_enabled() -> bool:
 
 
 def _grounding_applies(question, answer) -> bool:
-    """Call only for a successful free RAG (LLM) answer."""
+    """Call only for a successful free RAG (LLM) answer.
+
+    With answer="" it is the pre-generation check used for streaming (state,
+    meta question, cosine); the answer-based checks run again afterwards.
+    """
     if (st.session_state.get("sim_data") or {}).get("sim_type") == "NETWORK":
         return False
     if str(st.session_state.get("sim_step", "")).startswith("NET"):
@@ -332,27 +378,68 @@ def _grounding_for(retrieval_scores) -> dict:
 
 
 def _render_badge(level):
-    st.caption(_grounding.BADGE_LABELS[level])
+    st.caption(_grounding.BADGE_LABELS[level], help=_grounding.BADGE_HELP)
 
 
 def _render_sources_panel(retrieval_scores, level):
-    import os as _os
-    with st.expander("📄 Fontes consultadas"):
-        def _name(item):
-            return _os.path.basename(item["source"]) or item["source"]
-        if level == "red":
+    """'Fontes consultadas': one entry per file (best score, excerpt count, pages)."""
+    if level == "red":
+        with st.expander("📄 Fontes consultadas"):
             if retrieval_scores:
-                best = max(retrieval_scores, key=lambda x: x["score"])
+                best = _ux.group_sources(retrieval_scores)[0]
                 st.caption(
                     "Nenhum documento com relevância suficiente foi encontrado. "
-                    f"Melhor resultado: **{_name(best)}** — {best['score']:.2f} "
+                    f"Melhor resultado: **{best['file']}** — {best['best']:.2f} "
                     f"(abaixo do limite de {_G_LOW:.2f})"
                 )
             else:
                 st.caption("Nenhum documento foi recuperado.")
-        else:
-            for item in retrieval_scores:
-                st.caption(f"• {_name(item)}  —  {item['score']:.2f}")
+        return
+    groups = _ux.group_sources(retrieval_scores)
+    if not groups:
+        return
+    st.caption("📄 Fontes consultadas")
+    for g in groups:
+        # expanders cannot be nested, so each file is its own collapsed entry
+        with st.expander(_ux.source_label(g)):
+            if g["excerpts"]:
+                for ex in g["excerpts"]:
+                    st.caption(f"“{ex}”")
+            else:
+                st.caption("Trechos não disponíveis para esta resposta.")
+
+
+def _render_pwf_download(block: str, kind: str, msg: dict, idx: int):
+    data, enc = _ux.pwf_bytes(block)
+    st.download_button(
+        "⬇️ Baixar arquivo .pwf",
+        data=data,
+        file_name=_ux.pwf_filename(kind, msg.get("pwf_title")),
+        mime="text/plain",
+        key=f"pwf_dl_{msg.get('message_id')}_{idx}",
+    )
+    if enc != "ascii":
+        st.caption("Arquivo contém caracteres não-ASCII; codificado em latin-1.")
+
+
+def _render_body(msg: dict):
+    """Message text; 'Detalhes' expander for secondary text; .pwf download under each block."""
+    main = msg.get("main", msg["content"])
+    details = msg.get("details")
+    segs = _ux.split_pwf_segments(main, msg.get("sim_type")) if msg.get("deterministic") else []
+    if segs:
+        for i, seg in enumerate(segs):
+            if seg[0] == "text":
+                if seg[1].strip():
+                    st.markdown(seg[1])
+            else:
+                st.markdown(seg[1])
+                _render_pwf_download(seg[2], seg[3], msg, i)
+    else:
+        st.markdown(main)
+    if details:
+        with st.expander("Detalhes"):
+            st.markdown(details)
 
 
 def _render_message(msg: dict):
@@ -361,7 +448,7 @@ def _render_message(msg: dict):
         level = msg.get("grounding_level")
         if level in _grounding.BADGE_LABELS:
             _render_badge(level)
-        st.markdown(msg["content"])
+        _render_body(msg)
         if level in _grounding.BADGE_LABELS and "retrieval_scores" in msg:
             _render_sources_panel(msg["retrieval_scores"], level)
         elif "sources" in msg and msg["sources"]:
@@ -410,8 +497,9 @@ _PARPEL_SCENARIOS = (
     "3. Verão Mínima Noturna (0h–6h e 18h–0h, novembro–abril)\n"
     "4. Inverno Máxima Diurna (6h–18h, maio–outubro)\n"
     "5. Inverno Máxima Noturna (0h–6h e 18h–0h, maio–outubro)\n"
-    "6. Inverno Mínima Noturna (0h–6h e 18h–0h, maio–outubro)\n\n"
-    "Nota: dentro do arquivo SAV, ao carregá-lo no ANAREDE, você poderá "
+    "6. Inverno Mínima Noturna (0h–6h e 18h–0h, maio–outubro)"
+    + _ux.DETAILS_SEP
+    + "Nota: dentro do arquivo SAV, ao carregá-lo no ANAREDE, você poderá "
     "selecionar o cenário desejado. O SAV contém todos os patamares."
 )
 
@@ -426,6 +514,38 @@ _PDE_SCENARIOS = (
     "7. Máxima Coincidente SIN Úmido (14h–16h, março)\n"
     "8. Mínima Líquida Diurna Coincidente SIN Seco (12h–14h, agosto)"
 )
+
+# ── Database download links (full block once per session, then a reminder) ──
+_SINTEGRE_URL = "https://www.ons.org.br/topo/acesso-restrito"
+_EPE_URL = ("https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/"
+            "planejamento-da-transmissao/bases-de-dados-de-simulacao")
+
+_DOWNLOAD_LINKS_BLOCK = (
+    "Antes de começarmos, você vai precisar baixar os arquivos da base "
+    "de dados. Existem duas fontes principais:\n\n"
+    "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos. "
+    "Base lançada no início do ano com revisões ao longo do ano. "
+    "Acesso via Portal SINTEGRE (cadastro gratuito):\n"
+    f"{_SINTEGRE_URL}\n\n"
+    "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos. "
+    "Download público direto, sem cadastro:\n"
+    f"{_EPE_URL}\n\n"
+    "Você pode ir baixando enquanto respondemos as próximas perguntas."
+)
+
+_DOWNLOAD_LINKS_REMINDER = (
+    f"📥 Lembrete: as bases estão no [Portal SINTEGRE (ONS)]({_SINTEGRE_URL}) "
+    f"e no [site da EPE]({_EPE_URL})."
+)
+
+
+def _download_links_text() -> str:
+    """Full SINTEGRE/EPE block the first time in a session, a one-line reminder after."""
+    if st.session_state.get("_links_shown"):
+        return _DOWNLOAD_LINKS_REMINDER
+    st.session_state["_links_shown"] = True
+    return _DOWNLOAD_LINKS_BLOCK
+
 
 # ── STEP 1 database-selection question ────────────────────────────────────────
 # Defined ONCE and reused in every place that renders the STEP1 prompt so the
@@ -945,11 +1065,11 @@ def _net_lines_start(data: dict) -> str:
     data["net3"] = {"idx": 0, "field": "count", "current": {}}
     if not network.get("lines"):
         network["lines"] = []
-    return (
-        f"Ótimo! **{n_buses} barra(s)** registrada(s).\n\n"
+    return _ux.with_details(
+        f"**{n_buses} barra(s)** registrada(s).\n\n"
         f"Barras disponíveis: **{bus_list}**\n\n"
         "**Quantas linhas a rede terá?**\n\n"
-        f"(Para {n_buses} barras conectadas, você precisa de pelo menos **{n_buses - 1}** linha(s))\n\n"
+        f"(Para {n_buses} barras conectadas, você precisa de pelo menos **{n_buses - 1}** linha(s))",
         "💡 Digite `ajuda` para ver os modos de parâmetros disponíveis (por km, pu ou %)."
     )
 
@@ -1047,7 +1167,7 @@ def _handle_net_state(user_text: str):
             net2_total = len(data.get("network", {}).get("buses", []))
             return (
                 f"Voltando às barras. {net2_total} barra(s) registrada(s).\n\n"
-                + _net_lines_start(data).replace("Ótimo! ", "")
+                + _net_lines_start(data)
             )
         if prev_step == "NET3_LINES":
             data.pop("net3", None)
@@ -1092,9 +1212,9 @@ def _handle_net_state(user_text: str):
         data.setdefault("net_setup_field", "done")
         st.session_state.sim_step = "NET2_BUSES"
         data["net2"] = {"total": None, "idx": 0, "field": "count", "current": {}}
-        return (
+        return _ux.with_details(
             f"✅ Caso: **{network['title']}** | Base: **{network['base_mva']} MVA**\n\n"
-            "**Quantas barras a rede terá?** (mínimo **2**, máximo **20**)\n\n"
+            "**Quantas barras a rede terá?** (mínimo **2**, máximo **20**)",
             "💡 Digite `ajuda` para saber como organizar as barras."
         )
 
@@ -1496,7 +1616,8 @@ def _handle_net_state(user_text: str):
                 st.session_state.sim_step = "NET5_GENERATE"
                 return (
                     "✅ Arquivo PWF gerado com sucesso!\n\n"
-                    "Copie o conteúdo abaixo, salve como **minha_rede.pwf** e abra no ANAREDE:\n\n"
+                    f"Copie o conteúdo abaixo, salve como **{_ux.pwf_filename('NETWORK', network.get('title'))}** "
+                    "e abra no ANAREDE:\n\n"
                     f"```\n{pwf_text}\n```\n\n"
                     "Digite **continuar** quando tiver salvo o arquivo."
                 )
@@ -1696,12 +1817,9 @@ def _handle_net_state(user_text: str):
 def _net6_prompt(data: dict) -> str:
     """Return the NET6_RUN prompt explaining how to load the PWF."""
     # OPEN QUESTION: exact ANAREDE menu path for opening a new PWF file
-    return (
-        "Ótimo! Arquivo salvo.\n\n"
-        "**Para carregar no ANAREDE:**\n\n"
-        "⚠️ **QUESTÃO ABERTA:** O caminho exato de menu para abrir um arquivo PWF novo no ANAREDE "
-        "não foi confirmado pelo manual indexado — não será inventado aqui.\n\n"
-        "Instrução geral baseada no uso típico do ANAREDE:\n"
+    return _ux.with_details(
+        "Arquivo salvo.\n\n"
+        "**Para carregar no ANAREDE** (instrução geral baseada no uso típico do ANAREDE):\n"
         "1. Abra o ANAREDE\n"
         "2. Procure no menu principal a opção para abrir/carregar um arquivo de rede\n"
         "3. Selecione o arquivo `.pwf` que você salvou\n"
@@ -1709,7 +1827,9 @@ def _net6_prompt(data: dict) -> str:
         "O que aparece no canto superior direito do ANAREDE após executar o fluxo?\n\n"
         "- **Verde**: convergido ✅\n"
         "- **Amarelo**: limite de iterações — não convergiu\n"
-        "- **Vermelho**: divergiu"
+        "- **Vermelho**: divergiu",
+        "⚠️ **QUESTÃO ABERTA:** O caminho exato de menu para abrir um arquivo PWF novo no ANAREDE "
+        "não foi confirmado pelo manual indexado — não será inventado aqui."
     )
 
 
@@ -1717,21 +1837,21 @@ def _net7_converged_prompt(data: dict) -> str:
     network = data.get("network", {})
     n_buses = len(network.get("buses", []))
     n_lines = len(network.get("lines", []))
-    return (
+    return _ux.with_details(
         "✅ **O caso convergiu!**\n\n"
         f"Sua rede com **{n_buses} barras** e **{n_lines} linhas** foi calculada com sucesso.\n\n"
+        "**Próximos passos disponíveis:**\n"
+        "- `inserir BESS` — adicionar bateria ao caso\n"
+        "- `inserir STATCOM` — adicionar compensador reativo\n"
+        "- `contingências` ou `n-1` — análise de contingências\n"
+        "- `encerrar` — finalizar",
         "**Como interpretar os resultados:**\n"
         "- Tensões de barra aparecem próximas a cada barra no diagrama (em pu ou kV)\n"
         "- Fluxos de linha aparecem nas extremidades (MW e Mvar)\n"
         "- Hachura **VERMELHA**: sobrecarga ou sobretensão\n"
         "- Hachura **AZUL**: subtensão\n\n"
         "**Para salvar o caso:** ⚠️ QUESTÃO ABERTA — o procedimento exato para criar um SAV "
-        "a partir deste caso precisa ser confirmado com o manual do ANAREDE.\n\n"
-        "**Próximos passos disponíveis:**\n"
-        "- `inserir BESS` — adicionar bateria ao caso\n"
-        "- `inserir STATCOM` — adicionar compensador reativo\n"
-        "- `contingências` ou `n-1` — análise de contingências\n"
-        "- `encerrar` — finalizar"
+        "a partir deste caso precisa ser confirmado com o manual do ANAREDE."
     )
 
 
@@ -1982,10 +2102,39 @@ def _bess_pwf_lines(data: dict) -> str:
         "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
         f"```\n"
         f"{pwf_block}\n"
-        f"```\n\n"
-        "Após inserir a BESS, o quadrado no canto superior direito mudará para "
-        "**amarelo** ('Não Convergido'). Isso é normal."
+        f"```"
     )
+
+
+# STEP7 mode question: the options stay visible, the explanations go to "Detalhes".
+_BESS_MODE_QUESTION = (
+    "**Qual o modo de operação da BESS?**\n\n"
+    "1. **Controle de tensão (barra PV — tipo 2)**\n\n"
+    "2. **Despacho fixo (barra PQ — tipo 1)**"
+)
+_BESS_MODE_RECOMMENDATION = (
+    "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
+    "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
+    "(resistência e susceptância zeradas)."
+)
+_BESS_MODE_DETAILS = (
+    _BESS_MODE_RECOMMENDATION + "\n\n"
+    "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+    "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
+    "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+)
+_BESS_MODE_DETAILS_LONG = (
+    _BESS_MODE_RECOMMENDATION + "\n\n"
+    "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
+    "do SIN, especialmente se o leilão exigir modo GFM. A barra é configurada "
+    "com despacho fixo de potência ativa e tensão-alvo que a BESS tentará controlar.\n\n"
+    "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+)
+
+_BESS_AMARELO_NOTE = (
+    "Após inserir a BESS, o quadrado no canto superior direito mudará para "
+    "**amarelo** ('Não Convergido'). Isso é normal."
+)
 
 
 def extract_sim_context(message: str) -> dict:
@@ -2299,10 +2448,7 @@ def _handle_sim_state(user_text: str) -> str | None:
         st.session_state.sim_status = "active"
         return (
             "Reiniciando a simulação do zero!\n\n"
-            "Antes de começarmos, você vai precisar baixar os arquivos da base "
-            "de dados. Existem duas fontes principais:\n\n"
-            "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos.\n\n"
-            "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos.\n\n"
+            + _download_links_text() + "\n\n"
             + _STEP1_DB_QUESTION
         )
 
@@ -2319,17 +2465,16 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "NET1_SETUP"
             data["sim_type"] = "NETWORK"
             data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
-            return (
-                "Ótimo! Vou te guiar para montar uma rede do zero no ANAREDE.\n\n"
+            return _ux.with_details(
+                "Vou te guiar para montar uma rede do zero no ANAREDE.\n\n"
+                "**Qual o título deste caso e a potência base?**\n\n"
+                "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
+                "Ou apenas pressione **confirmar** para usar os padrões (título: 'Meu Caso', base: 100 MVA).",
                 "Precisarei de:\n"
                 "1. **Título e base MVA** do caso\n"
                 "2. **Dados de cada barra** (número, nome, tensão, tipo, cargas/geração)\n"
                 "3. **Parâmetros de cada linha** (R, X, B — aceito Ω/km, pu ou % diretamente)\n\n"
-                "Ao final, gero o arquivo `.pwf` completo pronto para o ANAREDE.\n\n"
-                "---\n\n"
-                "**Qual o título deste caso e a potência base?**\n\n"
-                "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
-                "Ou apenas pressione **confirmar** para usar os padrões (título: 'Meu Caso', base: 100 MVA)."
+                "Ao final, gero o arquivo `.pwf` completo pronto para o ANAREDE."
             )
         if _is_simulation_intent(user_text):
             # Clear any paused state when starting fresh
@@ -2342,21 +2487,12 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_status = "active"
             st.session_state.sim_step = "STEP1"
             data["sim_type"] = "STATCOM" if "statcom" in user_text.lower() else "BESS"
-            return (
-                "Ótimo! Vou te guiar pelo processo de simulação passo a passo.\n\n"
-                "Antes de começarmos, você vai precisar baixar os arquivos da base "
-                "de dados. Existem duas fontes principais:\n\n"
-                "📥 **PAR/PEL (ONS)** — planejamento operacional, horizonte de 5 anos. "
-                "Base lançada no início do ano com revisões ao longo do ano. "
-                "Acesso via Portal SINTEGRE (cadastro gratuito):\n"
-                "https://www.ons.org.br/topo/acesso-restrito\n\n"
-                "📥 **PDE (EPE)** — planejamento de expansão, horizonte de 10 anos. "
-                "Download público direto, sem cadastro:\n"
-                "https://www.epe.gov.br/pt/areas-de-atuacao/energia-eletrica/planejamento-da-transmissao/bases-de-dados-de-simulacao\n\n"
-                "Você pode ir baixando enquanto respondemos as próximas perguntas.\n\n"
+            return _ux.with_details(
+                "Vou te guiar pelo processo de simulação passo a passo.\n\n"
+                + _download_links_text() + "\n\n"
                 "---\n\n"
-                + _STEP1_DB_QUESTION + "\n\n"
-                + _STEP1_DB_RECOMMENDATION
+                + _STEP1_DB_QUESTION,
+                _STEP1_DB_RECOMMENDATION
             )
         if _is_lt_data_message(user_text):
             pending_lt = _parse_lt_params(user_text)
@@ -2393,7 +2529,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "IDLE_LT_NET_CHOICE"
             # Keep pending_lt in sim_data
             return (
-                (f"Ótimo! Parâmetros registrados: **{lt_summary}**.\n\n" if lt_summary else "Ótimo!\n\n")
+                (f"Parâmetros registrados: **{lt_summary}**.\n\n" if lt_summary else "")
                 + "Como deseja usar os dados desta linha?\n\n"
                 "**1.** Montar uma rede nova do zero com esta linha já incluída\n\n"
                 "**2.** Inserir BESS/STATCOM em um caso PAR/PEL/PDE existente "
@@ -2428,14 +2564,13 @@ def _handle_sim_state(user_text: str) -> str | None:
             data["sim_type"] = "NETWORK"
             data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
             lt_summary = _format_lt_params(pending_lt)
-            return (
-                f"Ótimo! A linha (**{lt_summary}**) será automaticamente incluída na rede.\n\n"
-                "Vou precisar que você defina as barras primeiro, e depois a conversão "
-                "dos parâmetros será aplicada na linha.\n\n"
-                "---\n\n"
+            return _ux.with_details(
+                f"A linha (**{lt_summary}**) será automaticamente incluída na rede.\n\n"
                 "**Qual o título deste caso e a potência base?**\n\n"
                 "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
-                "Ou **confirmar** para padrões (título: 'Meu Caso', base: 100 MVA)."
+                "Ou **confirmar** para padrões (título: 'Meu Caso', base: 100 MVA).",
+                "Vou precisar que você defina as barras primeiro, e depois a conversão "
+                "dos parâmetros será aplicada na linha."
             )
 
         if tl in ("2",) or any(w in tl for w in ["bess", "statcom", "par", "pel", "pde", "ons", "epe", "existente", "caso existente"]):
@@ -2443,7 +2578,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "STEP1"
             data["sim_type"] = "BESS"
             return (
-                "Certo! Seguindo pelo fluxo de inserção em caso existente.\n\n"
+                "Seguindo pelo fluxo de inserção em caso existente.\n\n"
                 "Os parâmetros da LT ficam registrados para referência.\n\n"
                 "---\n\n"
                 + _STEP1_DB_QUESTION
@@ -2464,7 +2599,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             data["sim_type"] = "NETWORK"
             data["network"] = {"title": "Meu Caso", "base_mva": 100.0, "buses": [], "lines": []}
             return (
-                "Ótimo! Vou te guiar para montar uma rede do zero.\n\n"
+                "Vou te guiar para montar uma rede do zero.\n\n"
                 "**Qual o título deste caso e a potência base?**\n\n"
                 "Exemplo: `LT 230kV Teste, 100 MVA`\n\n"
                 "Ou **confirmar** para padrões (título: 'Meu Caso', base: 100 MVA)."
@@ -2482,11 +2617,12 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "**3** — Minha própria rede (montar do zero)"
             )
         st.session_state.sim_step = "STEP2"
-        return (
-            f"Ótimo, usaremos o **{label}**.\n\n"
+        return _ux.with_details(
+            f"Base selecionada: **{label}**.\n\n"
             "**Qual ano (ou anos) deseja estudar?**\n\n"
             "Pode informar um único ano (ex: **2028**) ou múltiplos anos "
-            "(ex: **2027, 2028, 2029**). O normal é estudar um conjunto de anos diferentes."
+            "(ex: **2027, 2028, 2029**).",
+            "O normal é estudar um conjunto de anos diferentes."
         )
 
     # ── STEP 2: waiting for year(s) ───────────────────────────────────────────
@@ -2532,7 +2668,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             return "O que aparece no canto superior direito do ANAREDE após carregar o caso?"
 
         # Base case is converged — fast-forward as far as the message allows
-        converged_prefix = "Perfeito! O caso base está convergido.\n\n---\n\n"
+        converged_prefix = "O caso base está convergido.\n\n---\n\n"
         sim_type = data.get("sim_type", "BESS")
         device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
 
@@ -2559,16 +2695,18 @@ def _handle_sim_state(user_text: str) -> str | None:
                         converged_prefix
                         + f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
                         f"potência nominal **{ctx['S_mva']} MVA** registrada.\n\n"
-                        "**Qual a potência ativa em MW?**\n\n"
-                        "Os limites de potência reativa serão calculados: "
+                        "**Qual a potência ativa em MW?**"
+                        + _ux.DETAILS_SEP
+                        + "Os limites de potência reativa serão calculados: "
                         "Q_max = √(S² − P²), Q_min = −Q_max"
                     )
                 st.session_state.sim_step = "STEP8"
                 return (
                     converged_prefix
                     + f"Barra selecionada: **{ctx['bus_number']}** e modo **{mode_label}** identificados.\n\n"
-                    "**Qual a potência nominal da BESS em MVA?**\n\n"
-                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "**Qual a potência nominal da BESS em MVA?**"
+                    + _ux.DETAILS_SEP
+                    + "Os limites de potência reativa serão calculados automaticamente: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
                 )
             st.session_state.sim_step = "STEP7"
@@ -2576,37 +2714,34 @@ def _handle_sim_state(user_text: str) -> str | None:
             return (
                 converged_prefix
                 + f"Barra selecionada: **{ctx['bus_number']}**.\n\n"
-                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
-                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
-                "(resistência e susceptância zeradas).\n\n"
-                "**Qual o modo de operação da BESS?**\n\n"
-                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
-                "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
-                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+                + _BESS_MODE_QUESTION
+                + _ux.DETAILS_SEP
+                + _BESS_MODE_DETAILS
             )
 
         # No bus info — check LST choice
-        lst_question = (
+        lst_question = _ux.with_details(
             "**Agora vamos preparar a visualização da região de estudo.**\n\n"
-            "A tela do ANAREDE está em branco. Para visualizar os resultados "
-            "graficamente, você precisa carregar ou desenhar um diagrama LST.\n\n"
             "**Opção A** — Se já tiver um arquivo LST:\n"
             "Vá em **Diagrama > Carregar** e selecione o arquivo LST.\n\n"
             "**Opção B** — Se não tiver:\n"
-            "Clique no ícone do **lápis** no menu superior. Aparecerá um diálogo "
-            "com os elementos que podem ser modelados. Desenhe a região ao entorno "
+            "Clique no ícone do **lápis** no menu superior e desenhe a região ao entorno "
             "da barra que deseja estudar.\n\n"
-            "Qual opção você vai utilizar?"
+            "Qual opção você vai utilizar?",
+            "A tela do ANAREDE está em branco. Para visualizar os resultados "
+            "graficamente, você precisa carregar ou desenhar um diagrama LST. "
+            "Ao clicar no lápis, aparecerá um diálogo com os elementos que podem ser modelados."
         )
         if ctx["lst"] is not None:
             # LST answered inline — skip STEP6 and go to STEP7
             st.session_state.sim_step = "STEP7"
             return (
                 converged_prefix
-                + f"Ótimo! LST identificado.\n\n"
+                + "LST identificado.\n\n"
                 f"**Agora vamos modelar o {device_label}.**\n\n"
-                f"Qual é a barra onde deseja inserir o {device_label}?\n\n"
-                "Dica: escolha a subestação com maior carga na área de estudo "
+                f"Qual é a barra onde deseja inserir o {device_label}?"
+                + _ux.DETAILS_SEP
+                + "Dica: escolha a subestação com maior carga na área de estudo "
                 "que disponha de margem para injeção de potência."
             )
 
@@ -2630,7 +2765,6 @@ def _handle_sim_state(user_text: str) -> str | None:
                         data["bess_p_mw"] = str(ctx["P_mw"])
                         st.session_state.sim_step = "STEP8"
                         return (
-                            "Ótimo!\n\n"
                             f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
                             f"potência **{ctx['S_mva']} MVA**, P ativa: **{ctx['P_mw']} MW** identificados.\n\n"
                             "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
@@ -2638,39 +2772,34 @@ def _handle_sim_state(user_text: str) -> str | None:
                         )
                     st.session_state.sim_step = "STEP8"
                     return (
-                        "Ótimo!\n\n"
                         f"Barra **{ctx['bus_number']}**, modo **{mode_label}**, "
                         f"potência nominal **{ctx['S_mva']} MVA** registrada.\n\n"
-                        "**Qual a potência ativa em MW?**\n\n"
-                        "Os limites de potência reativa serão calculados: "
+                        "**Qual a potência ativa em MW?**"
+                        + _ux.DETAILS_SEP
+                        + "Os limites de potência reativa serão calculados: "
                         "Q_max = √(S² − P²), Q_min = −Q_max"
                     )
                 st.session_state.sim_step = "STEP8"
                 return (
-                    "Ótimo!\n\n"
                     f"Barra selecionada: **{ctx['bus_number']}** e modo **{mode_label}** identificados.\n\n"
-                    "**Qual a potência nominal da BESS em MVA?**\n\n"
-                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "**Qual a potência nominal da BESS em MVA?**"
+                    + _ux.DETAILS_SEP
+                    + "Os limites de potência reativa serão calculados automaticamente: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
                 )
             st.session_state.sim_step = "STEP7"
             # bess_bus already set — jump straight to mode question
             return (
-                "Ótimo!\n\n"
                 f"Barra selecionada: **{ctx['bus_number']}**.\n\n"
-                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
-                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
-                "(resistência e susceptância zeradas).\n\n"
-                "**Qual o modo de operação da BESS?**\n\n"
-                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
-                "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
-                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+                + _BESS_MODE_QUESTION
+                + _ux.DETAILS_SEP
+                + _BESS_MODE_DETAILS
             )
         st.session_state.sim_step = "STEP7"
         return (
-            "Ótimo!\n\n"
             f"**Agora vamos modelar o {device_label}.**\n\n"
-            f"Qual é a barra onde deseja inserir o {device_label}?\n\n"
+            f"Qual é a barra onde deseja inserir o {device_label}?"
+            + _ux.DETAILS_SEP
             + (
                 "Dica: escolha a subestação com maior carga na área de estudo "
                 "que disponha de margem para injeção de potência. O ONS disponibiliza "
@@ -2739,30 +2868,28 @@ def _handle_sim_state(user_text: str) -> str | None:
                     return (
                         f"Barra **{bus}**, modo **{mode_label}**, "
                         f"potência nominal **{ctx7['S_mva']} MVA** registrada.\n\n"
-                        "**Qual a potência ativa em MW?**\n\n"
-                        "Os limites de potência reativa serão calculados: "
+                        "**Qual a potência ativa em MW?**"
+                        + _ux.DETAILS_SEP
+                        + "Os limites de potência reativa serão calculados: "
                         "Q_max = √(S² − P²), Q_min = −Q_max"
                     )
                 st.session_state.sim_step = "STEP8"
                 return (
                     f"Barra selecionada: **{bus}** e modo **{mode_label}** identificados.\n\n"
-                    "**Qual a potência nominal da BESS em MVA?**\n\n"
-                    "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
+                    "**Qual a potência nominal da BESS em MVA?**"
+                    + _ux.DETAILS_SEP
+                    + "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
                     "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
-                    "- Para cada valor, verifique convergência e impactos no sistema\n\n"
-                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "- Para cada valor, verifique convergência e impactos no sistema"
+                    + _ux.DETAILS_SEP
+                    + "Os limites de potência reativa serão calculados automaticamente: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
                 )
             return (
                 f"Barra selecionada: **{bus}**.\n\n"
-                "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
-                "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
-                "(resistência e susceptância zeradas).\n\n"
-                "**Qual o modo de operação da BESS?**\n\n"
-                "1. **Controle de tensão (barra PV — tipo 2):** recomendado para estudos "
-                "do SIN, especialmente se o leilão exigir modo GFM. A barra é configurada "
-                "com despacho fixo de potência ativa e tensão-alvo que a BESS tentará controlar.\n\n"
-                "2. **Despacho fixo (barra PQ — tipo 1):** injeção fixa de potência ativa e reativa."
+                + _BESS_MODE_QUESTION
+                + _ux.DETAILS_SEP
+                + _BESS_MODE_DETAILS_LONG
             )
         else:
             # Waiting for mode
@@ -2789,18 +2916,21 @@ def _handle_sim_state(user_text: str) -> str | None:
                 st.session_state.sim_step = "STEP8"
                 return (
                     f"Modo **{mode_label}**, potência nominal **{ctx7['S_mva']} MVA** registrada.\n\n"
-                    "**Qual a potência ativa em MW?**\n\n"
-                    "Os limites de potência reativa serão calculados: "
+                    "**Qual a potência ativa em MW?**"
+                    + _ux.DETAILS_SEP
+                    + "Os limites de potência reativa serão calculados: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
                 )
             st.session_state.sim_step = "STEP8"
             return (
                 f"Modo selecionado: **{mode_label}**.\n\n"
-                "**Qual a potência nominal da BESS em MVA?**\n\n"
-                "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
+                "**Qual a potência nominal da BESS em MVA?**"
+                + _ux.DETAILS_SEP
+                + "Para o estudo, recomenda-se variar a potência ativa injetada:\n"
                 "- Comece com +100% (injeção máxima), 0% e -100% (carga)\n"
-                "- Para cada valor, verifique convergência e impactos no sistema\n\n"
-                "Os limites de potência reativa serão calculados automaticamente: "
+                "- Para cada valor, verifique convergência e impactos no sistema"
+                + _ux.DETAILS_SEP
+                + "Os limites de potência reativa serão calculados automaticamente: "
                 "Q_max = √(S² − P²), Q_min = −Q_max"
             )
 
@@ -2823,8 +2953,9 @@ def _handle_sim_state(user_text: str) -> str | None:
             # P_mw not given yet — ask for it explicitly
             return (
                 f"Potência nominal: **{mva} MVA** registrada.\n\n"
-                "**Qual a potência ativa em MW?**\n\n"
-                "Os limites de potência reativa serão calculados: "
+                "**Qual a potência ativa em MW?**"
+                + _ux.DETAILS_SEP
+                + "Os limites de potência reativa serão calculados: "
                 "Q_max = √(S² − P²), Q_min = −Q_max"
             )
         elif "bess_p_mw" not in data:
@@ -2869,6 +3000,8 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
                 "3. Clique em **Salvar**\n\n"
                 "Confirme quando o caso estiver salvo."
+                + _ux.DETAILS_SEP
+                + _BESS_AMARELO_NOTE
             )
 
     # ── STEP 9: waiting for save confirmation ─────────────────────────────────
@@ -2876,14 +3009,14 @@ def _handle_sim_state(user_text: str) -> str | None:
         t = user_text.lower()
         if any(kw in t for kw in ["salvo", "salvei", "ok", "sim", "pronto", "feito", "confirmado", "salv"]):
             st.session_state.sim_step = "STEP10"
-            return (
-                "Ótimo! Caso salvo.\n\n"
+            return _ux.with_details(
+                "Caso salvo.\n\n"
                 "**Agora rode o algoritmo de fluxo de potência.**\n\n"
-                "Forma mais rápida: pressione **Ctrl + R** no teclado.\n"
-                "Isso repete a última configuração do algoritmo salva no SAV.\n\n"
+                "Forma mais rápida: pressione **Ctrl + R** no teclado.\n\n"
+                "Após rodar, o que aparece no canto superior direito do ANAREDE?",
+                "Ctrl + R repete a última configuração do algoritmo salva no SAV.\n\n"
                 "Alternativa: vá em **Análise > Cálculo de Fluxo de Potência** para "
-                "acessar todos os métodos e controles disponíveis.\n\n"
-                "Após rodar, o que aparece no canto superior direito do ANAREDE?"
+                "acessar todos os métodos e controles disponíveis."
             )
         return "Confirme quando o caso estiver salvo no ANAREDE (responda 'salvo' ou 'pronto')."
 
@@ -2893,7 +3026,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             data.pop("divergence_color", None)
             st.session_state.sim_step = "STEP11"
             return (
-                "Ótimo! O caso convergiu.\n\n"
+                "O caso convergiu.\n\n"
                 "Salve o caso convergido (pode sobrescrever o caso salvo no passo anterior).\n\n"
                 "**Para verificar o impacto no diagrama:**\n"
                 "- Sobrecargas e sobretensões aparecem com **hachura VERMELHA**\n"
@@ -2996,19 +3129,19 @@ def _handle_sim_state(user_text: str) -> str | None:
             if any(kw in t for kw in ["sim", "quero", "gostaria", "contingência",
                                        "contingencia", "n-1", "n1", "yes"]):
                 st.session_state.sim_data["contingency_stage"] = "guide"
-                return (
-                    "Ótimo! Para análise de contingências N-1 no ANAREDE:\n\n"
+                return _ux.with_details(
+                    "Para análise de contingências N-1 no ANAREDE:\n\n"
                     "**1. Execute o cálculo:**\n"
                     "No ANAREDE: **Análise > Contingências (EXCT)** ou pressione **Ctrl+E**.\n\n"
-                    "**2. Interprete os resultados:**\n"
-                    "- **Hachura VERMELHA**: sobrecarga ou sobretensão na contingência\n"
-                    "- **Hachura AZUL**: subtensão na contingência\n"
-                    "- Sem hachura: sistema suporta a contingência\n\n"
                     "Quais linhas ou geradores deseja incluir na análise N-1?\n\n"
                     "Exemplos:\n"
                     "- `linha 1001-1002 circuito 1`\n"
                     "- `linha entre barras 1001 e 1002, circuito 1`\n"
-                    "- `gerador barra 1005`"
+                    "- `gerador barra 1005`",
+                    "**2. Interprete os resultados:**\n"
+                    "- **Hachura VERMELHA**: sobrecarga ou sobretensão na contingência\n"
+                    "- **Hachura AZUL**: subtensão na contingência\n"
+                    "- Sem hachura: sistema suporta a contingência"
                 )
             if any(kw in t for kw in ["não", "nao", "pular", "skip"]):
                 st.session_state.sim_step = "STEP12"
@@ -3213,10 +3346,7 @@ def _handle_sim_state(user_text: str) -> str | None:
             st.session_state.sim_step = "STEP1"
             st.session_state.simulation_mode = True
             st.session_state.sim_status = "active"
-            return (
-                _STEP1_DB_QUESTION + "\n\n"
-                + _STEP1_DB_RECOMMENDATION
-            )
+            return _ux.with_details(_STEP1_DB_QUESTION, _STEP1_DB_RECOMMENDATION)
 
         # BUG 2b — New year (2026–2040) → restart from STEP3 keeping same database
         new_years = _parse_years(user_text)
@@ -3259,15 +3389,17 @@ def _handle_sim_state(user_text: str) -> str | None:
                     return (
                         f"Modo **{mode_label}**, potência nominal **{ctx12['S_mva']} MVA** registrada. "
                         f"Mantendo barra **{prev_bus}** da simulação anterior.\n\n"
-                        "**Qual a potência ativa em MW?**\n\n"
-                        "Os limites de potência reativa serão calculados: "
+                        "**Qual a potência ativa em MW?**"
+                        + _ux.DETAILS_SEP
+                        + "Os limites de potência reativa serão calculados: "
                         "Q_max = √(S² − P²), Q_min = −Q_max"
                     )
                 st.session_state.sim_step = "STEP8"
                 return (
                     f"Modo **{mode_label}** identificado. Mantendo barra **{prev_bus}**.\n\n"
-                    "**Qual a potência nominal da BESS em MVA?**\n\n"
-                    "Os limites de potência reativa serão calculados automaticamente: "
+                    "**Qual a potência nominal da BESS em MVA?**"
+                    + _ux.DETAILS_SEP
+                    + "Os limites de potência reativa serão calculados automaticamente: "
                     "Q_max = √(S² − P²), Q_min = −Q_max"
                 )
             st.session_state.sim_step = "STEP7"
@@ -3364,8 +3496,6 @@ def _handle_sim_state(user_text: str) -> str | None:
             "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
             "salve como **STATCOM_modificacao.pwf** e carregue no ANAREDE:\n\n"
             f"```\n{pwf_block}\n```\n\n"
-            "Após inserir o STATCOM, o quadrado no canto superior direito mudará para "
-            "**amarelo** ('Não Convergido'). Isso é normal.\n\n"
             "---\n\n"
             "**Antes de rodar o fluxo de potência, salve o caso com o STATCOM incluído.**\n\n"
             "No ANAREDE:\n"
@@ -3373,6 +3503,9 @@ def _handle_sim_state(user_text: str) -> str | None:
             "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
             "3. Clique em **Salvar**\n\n"
             "Confirme quando o caso estiver salvo."
+            + _ux.DETAILS_SEP
+            + "Após inserir o STATCOM, o quadrado no canto superior direito mudará para "
+            "**amarelo** ('Não Convergido'). Isso é normal."
         )
 
     # ── NET states: build-from-scratch guided flow ────────────────────────────
@@ -3492,6 +3625,7 @@ with st.sidebar:
         st.session_state.sim_data = {}
         st.session_state.sim_status = None
         st.session_state.study = StudyState()
+        st.session_state.pop("_links_shown", None)  # links message is gone with the history
         st.session_state.chain = None
         st.session_state.chain_error = None
         clear_study()
@@ -3526,12 +3660,188 @@ if st.session_state.chain_error:
         st.session_state.chain_error = None
         st.rerun()
 
-for msg in st.session_state.messages:
-    _render_message(msg)
+# ── "Novidades da versão" banner (once per version per user) ──────────────────
 
-prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
+def _dismiss_release_notes():
+    """'Entendi' callback: persist last_seen_version; hide for this session even if the DB fails."""
+    st.session_state["_notes_dismissed"] = APP_VERSION
+    st.session_state["user"]["last_seen_version"] = APP_VERSION
+    try:
+        from auth.auth_service import set_last_seen_version
+        set_last_seen_version(st.session_state["user"]["id"], APP_VERSION)
+    except Exception:
+        pass
 
-if prompt:
+
+def _render_release_notes_banner():
+    notes = RELEASE_NOTES.get(APP_VERSION)
+    user = st.session_state.get("user") or {}
+    if (not notes or user.get("last_seen_version") == APP_VERSION
+            or st.session_state.get("_notes_dismissed") == APP_VERSION):
+        return
+    with st.container(border=True):
+        st.markdown(f"**🆕 Novidades da versão {APP_VERSION}**")
+        st.markdown("\n".join(f"- {n}" for n in notes.get("novidades", [])))
+        if notes.get("o_que_testar"):
+            st.markdown("**O que testar:**\n" + "\n".join(f"- {n}" for n in notes["o_que_testar"]))
+        st.button("Entendi", key=f"notes_ok_{APP_VERSION}", on_click=_dismiss_release_notes)
+
+
+# ── Free-conversation answers (RAG) ───────────────────────────────────────────
+
+def _sim_in_progress() -> bool:
+    return (st.session_state.get("sim_status") in ("active", "paused")
+            or st.session_state.get("sim_step", "IDLE") != "IDLE")
+
+
+def _guide_offer_allowed() -> bool:
+    """The LLM's 'Deseja que eu te guie…' offer: never during a simulation, else ≤1 per 5."""
+    previous = [m.get("content", "") for m in st.session_state.messages
+                if m.get("role") == "assistant" and not m.get("welcome")]
+    return _ux.guide_offer_allowed(previous, _sim_in_progress())
+
+
+def _write_stream(chunks) -> None:
+    """st.write_stream when available, else a placeholder updated per chunk."""
+    if hasattr(st, "write_stream"):
+        st.write_stream(chunks)
+        return
+    slot, acc = st.empty(), ""
+    for c in chunks:
+        acc += c
+        slot.markdown(acc + "▌")
+
+
+def _answer_with_llm(question, study_context, sim_context_note):
+    """
+    Retrieve once, show the grounding badge (and red disclosure), stream the answer,
+    then replace the streamed text with the final stored text so that what is shown
+    is exactly what is stored. Returns (answer, sources, grounding_info).
+    """
+    chain = st.session_state.chain
+    inputs = {"question": question, "study_context": study_context}
+    keep_guide = _guide_offer_allowed()
+    can_stream = all(hasattr(chain, a) for a in ("retrieve", "stream", "generate", "remember"))
+
+    if not can_stream:  # chain without the streaming interface: single invoke (pre-v6.5.0)
+        with st.spinner("Consultando base de conhecimento..."):
+            try:
+                result = chain.invoke(inputs)
+            except Exception as e:
+                answer = (f"Ocorreu um erro ao processar sua pergunta: `{e}`\n\n"
+                          "Verifique se o Qdrant e o Ollama estão acessíveis.") + sim_context_note
+                st.markdown(answer)
+                return answer, [], None
+        raw = result["answer"]
+        retrieval_scores = result.get("retrieval_scores")
+        docs = result.get("source_documents", [])
+        ginfo = None
+        if retrieval_scores is not None and _grounding_applies(question, raw):
+            ginfo = _grounding_for(retrieval_scores)
+        answer = _ux.clean_llm_answer(raw, keep_guide) + sim_context_note
+        if ginfo and ginfo["grounding_level"] == "red":
+            answer = f"{_grounding.DISCLOSURE}\n\n{answer}"
+        if ginfo:
+            _render_badge(ginfo["grounding_level"])
+        st.markdown(answer)
+    else:
+        with st.spinner("Consultando base de conhecimento..."):
+            try:
+                retrieved = chain.retrieve(question)   # the ONE search, before generation
+            except Exception as e:
+                answer = (f"Ocorreu um erro ao processar sua pergunta: `{e}`\n\n"
+                          "Verifique se o Qdrant e o Ollama estão acessíveis.") + sim_context_note
+                st.markdown(answer)
+                return answer, [], None
+        retrieval_scores = retrieved.get("retrieval_scores")
+        docs = retrieved.get("docs", [])
+        ginfo = None
+        if retrieval_scores is not None and _grounding_applies(question, ""):
+            ginfo = _grounding_for(retrieval_scores)
+        badge_slot, body_slot = st.empty(), st.empty()
+        if ginfo:
+            with badge_slot.container():
+                _render_badge(ginfo["grounding_level"])
+        disclosure = (f"{_grounding.DISCLOSURE}\n\n"
+                      if ginfo and ginfo["grounding_level"] == "red" else "")
+
+        raw_parts = []
+
+        def _tee(gen):
+            for c in gen:
+                raw_parts.append(c)
+                yield c
+
+        raw = None
+        try:
+            with body_slot.container():
+                if disclosure:
+                    st.markdown(disclosure)
+                _write_stream(_ux.filter_guide_stream(_tee(chain.stream(inputs, retrieved)), keep_guide))
+            raw = "".join(raw_parts)
+        except Exception:
+            raw = None
+        if not raw:  # streaming failed or produced nothing → non-streaming call, same context
+            try:
+                raw = chain.generate(inputs, retrieved)
+            except Exception as e:
+                badge_slot.empty()
+                answer = (f"Ocorreu um erro ao processar sua pergunta: `{e}`\n\n"
+                          "Verifique se o Qdrant e o Ollama estão acessíveis.") + sim_context_note
+                body_slot.markdown(answer)
+                return answer, [], None
+        try:
+            chain.remember(question, raw)
+        except Exception:
+            pass
+        if ginfo and not _grounding_applies(question, raw):  # meta reply / PWF output
+            ginfo, disclosure = None, ""
+            badge_slot.empty()
+        answer = disclosure + _ux.clean_llm_answer(raw, keep_guide) + sim_context_note
+        body_slot.markdown(answer)
+
+    if ginfo:
+        _render_sources_panel(ginfo["retrieval_scores"], ginfo["grounding_level"])
+        sources = list({doc.metadata.get("source", "desconhecido") for doc in docs})
+    else:
+        sources = list({doc.metadata.get("source", "desconhecido") for doc in docs})
+        if sources:
+            with st.expander("📄 Fontes consultadas"):
+                for src in sources:
+                    st.caption(f"• {src}")
+    return answer, sources, ginfo
+
+
+_NUDGE_LABELS = {
+    "NET1_SETUP":   "título e base MVA",
+    "NET2_BUSES":   "dados das barras",
+    "NET3_LINES":   "dados das linhas",
+    "NET4_REVIEW":  "revisão da rede",
+    "NET5_GENERATE": "arquivo PWF gerado",
+    "NET6_RUN":     "resultado do fluxo",
+    "NET7_RESULTS": "resultados da simulação",
+    "STEP1": "base de dados",
+    "STEP2": "ano(s)",
+    "STEP3": "cenário de carga",
+    "STEP4": "convergência do caso base",
+    "STEP6": "diagrama LST",
+    "STEP7": "barra de inserção",
+    "STEP8": "potência da BESS",
+    "STATCOM_STEP_Q": "limites reativos",
+    "STATCOM_STEP_CBUS": "barra controlada",
+    "STEP9": "confirmação de salvamento",
+    "STEP10": "resultado do fluxo",
+    "STEP11": "análise de resultados",
+    "STEP11B": "contingências N-1",
+}
+
+
+def _process_input(prompt: str, source: str = "typed"):
+    """
+    One user turn: show + log the user message, run the state machine (or the LLM),
+    show + log the reply. Typed text, option buttons and forms all come through here
+    with the same canonical text, so they produce exactly the same state.
+    """
     # Sim context when the user message ARRIVED (before any state change)
     _step_before, _type_before = _sim_snapshot()
     _user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
@@ -3568,14 +3878,14 @@ if prompt:
             _resume_msg += f"\n\n{last_q}"
         _reply = _make_assistant_message(
             _resume_msg, user_message=prompt,
-            step_before=_step_before, type_before=_type_before)
+            step_before=_step_before, type_before=_type_before, deterministic=True)
         with st.chat_message("assistant"):
-            st.markdown(_resume_msg)
+            _render_body(_reply)
             _render_feedback_widget(_reply)
         st.session_state.messages.append(_reply)
         _log_message(_reply)
         save_study(st.session_state.study)
-        st.stop()
+        return
 
     # ── Auto-resume: if paused and user gives a simulation-like answer ────────
     if st.session_state.sim_status == "paused" and not _is_free_question(prompt):
@@ -3596,16 +3906,19 @@ if prompt:
     with st.chat_message("assistant"):
         if sim_response is not None:
             # Deterministic simulation guide response
-            answer = sim_response
-            sources = []
-            st.markdown(answer)
+            _reply = _make_assistant_message(
+                sim_response, sources=[], user_message=prompt,
+                step_before=_step_before, type_before=_type_before, deterministic=True)
+            _render_body(_reply)
         elif st.session_state.chain is None:
             answer = (
                 "O sistema ainda não está conectado ao Qdrant/Ollama. "
                 "Verifique a mensagem de erro acima e clique em **Tentar reconectar**."
             )
-            sources = []
             st.markdown(answer)
+            _reply = _make_assistant_message(
+                answer, sources=[], user_message=prompt,
+                step_before=_step_before, type_before=_type_before)
         else:
             # MODE 1: free technical Q&A via LLM
             study_context = st.session_state.study.summary()
@@ -3620,72 +3933,19 @@ if prompt:
             active_step = st.session_state.sim_step
             sim_context_note = ""
             if active_step not in ("IDLE", "STEP12") and st.session_state.sim_status == "active":
-                _nudge_labels = {
-                    "NET1_SETUP":   "título e base MVA",
-                    "NET2_BUSES":   "dados das barras",
-                    "NET3_LINES":   "dados das linhas",
-                    "NET4_REVIEW":  "revisão da rede",
-                    "NET5_GENERATE": "arquivo PWF gerado",
-                    "NET6_RUN":     "resultado do fluxo",
-                    "NET7_RESULTS": "resultados da simulação",
-                    "STEP1": "base de dados",
-                    "STEP2": "ano(s)",
-                    "STEP3": "cenário de carga",
-                    "STEP4": "convergência do caso base",
-                    "STEP6": "diagrama LST",
-                    "STEP7": "barra de inserção",
-                    "STEP8": "potência da BESS",
-                    "STATCOM_STEP_Q": "limites reativos",
-                    "STATCOM_STEP_CBUS": "barra controlada",
-                    "STEP9": "confirmação de salvamento",
-                    "STEP10": "resultado do fluxo",
-                    "STEP11": "análise de resultados",
-                    "STEP11B": "contingências N-1",
-                }
-                nudge = _nudge_labels.get(active_step, "próximo passo")
+                nudge = _NUDGE_LABELS.get(active_step, "próximo passo")
                 sim_context_note = (
                     f"\n\n---\n↩️ Quando terminar, responda sobre **{nudge}** "
                     "para continuar a simulação."
                 )
 
-            with st.spinner("Consultando base de conhecimento..."):
-                try:
-                    result = st.session_state.chain.invoke({
-                        "question": full_prompt,
-                        "study_context": study_context,
-                    })
-                    answer = result["answer"] + sim_context_note
-                    _scores = result.get("retrieval_scores")
-                    if _scores is not None and _grounding_applies(full_prompt, result["answer"]):
-                        _grounding_info = _grounding_for(_scores)
-                        if _grounding_info["grounding_level"] == "red":
-                            answer = f"{_grounding.DISCLOSURE}\n\n{answer}"
-                    sources = list({
-                        doc.metadata.get("source", "desconhecido")
-                        for doc in result.get("source_documents", [])
-                    })
-                except Exception as e:
-                    answer = (
-                        f"Ocorreu um erro ao processar sua pergunta: `{e}`\n\n"
-                        "Verifique se o Qdrant e o Ollama estão acessíveis."
-                    ) + sim_context_note
-                    sources = []
+            answer, sources, _grounding_info = _answer_with_llm(
+                full_prompt, study_context, sim_context_note)
+            _reply = _make_assistant_message(
+                answer, sources=sources, user_message=prompt,
+                step_before=_step_before, type_before=_type_before,
+                grounding=_grounding_info)
 
-            if _grounding_info:
-                _render_badge(_grounding_info["grounding_level"])
-            st.markdown(answer)
-            if _grounding_info:
-                _render_sources_panel(_grounding_info["retrieval_scores"],
-                                      _grounding_info["grounding_level"])
-            elif sources:
-                with st.expander("📄 Fontes consultadas"):
-                    for src in sources:
-                        st.caption(f"• {src}")
-
-        _reply = _make_assistant_message(
-            answer, sources=sources, user_message=prompt,
-            step_before=_step_before, type_before=_type_before,
-            grounding=_grounding_info)
         _render_feedback_widget(_reply)
 
     st.session_state.messages.append(_reply)
@@ -3694,3 +3954,14 @@ if prompt:
     _log_message(_reply)
 
     save_study(st.session_state.study)
+
+
+_render_release_notes_banner()
+
+for msg in st.session_state.messages:
+    _render_message(msg)
+
+prompt = st.chat_input("Digite sua pergunta sobre o SIN...")
+
+if prompt:
+    _process_input(prompt, "typed")
