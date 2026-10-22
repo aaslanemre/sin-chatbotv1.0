@@ -344,7 +344,7 @@ main = m.get("main", m["content"])
 check("STEP7: each option once, explanation inline",
       main.count("Controle de tensão") == 1 and main.count("Despacho fixo") == 1
       and "GFM" in main and m["content"].count("Controle de tensão") == 1, m["content"])
-run("1"); run("500 MVA"); run("417"); run("91000")
+run("1"); run("500 MVA"); run("417"); run("91000"); run("Gerar arquivo agora")
 gen = re.search(r"```\n(.*?)\n```", ss.messages[-1]["content"], re.S).group(1)
 x_written = sl(block_lines(gen, "DLIN")[0], DLIN["X"]).strip()
 check("value shown to the user == value in the generated DLIN",

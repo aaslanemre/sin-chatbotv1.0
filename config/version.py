@@ -18,6 +18,8 @@ RELEASE_NOTES = {
             "Sugestões clicáveis com valores usados com frequência (ex: base 100 MVA, "
             "tensões do SIN, circuito 1): o clique só preenche o campo, que continua editável. "
             "Ocultas no modo especialista.",
+            "Várias BESS no mesmo estudo (até 10): depois da nova barra, escolha "
+            "“Adicionar outra BESS” ou “Gerar arquivo agora”; um único .pwf com todas.",
         ],
         "o_que_testar": [
             "Gere o .pwf de uma BESS e carregue no ANAREDE: o DLIN deve ser aceito sem erro.",
@@ -25,6 +27,8 @@ RELEASE_NOTES = {
             "Digite “quero modelar uma bess” e “como modelar uma BESS no ANAREDE?” e compare.",
             "No passo de carregar o SAV, pergunte “não acho essa opção, como encontrar?”.",
             "Na rede do zero, use as sugestões (sugestão) e altere um valor antes de enviar.",
+            "Insira 2 ou 3 BESS (inclusive duas na mesma barra), use ✏️ em uma delas, "
+            "pause, saia, entre de novo e gere o arquivo.",
         ],
     },
     "v6.5.0": {

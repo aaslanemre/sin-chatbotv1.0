@@ -67,6 +67,7 @@ for _mod in [
     sys.modules[_mod] = types.ModuleType(_mod)
 
 sys.modules["agents.pwf_agent"].generate_dbar_block        = lambda **kw: "(dbar stub)"
+sys.modules["agents.pwf_agent"].generate_bess_block = lambda *a, **kw: "(bess stub)"  # v6.5.1
 sys.modules["agents.pwf_agent"].generate_statcom_block     = lambda **kw: "(statcom stub)"
 sys.modules["agents.pwf_agent"].generate_contingency_block = lambda *a, **kw: "(ctg stub)"
 sys.modules["agents.results_analyzer"].save_results_file   = lambda *a, **kw: None

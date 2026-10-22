@@ -201,6 +201,8 @@ def controls_for(step, data, parpel_scenarios=(), pde_scenarios=()):
             return [_form("bess_power", "Potência da BESS", [F_MVA, dict(F_P, required=False)])]
         if "bess_p_mw" not in data:
             return [_form("bess_p", "Potência ativa da BESS", [F_P])]
+        if "bess_bus_number" in data:   # v6.5.1: one file now, or another BESS
+            return [_buttons(_opt("Gerar arquivo agora"), _opt("Adicionar outra BESS"))]
         return [_form("bess_new_bus", "Nova barra da BESS", [F_NEW_BUS])]
     if step == "STATCOM_STEP_Q":
         return [_form("statcom_q", "Capacidade reativa do STATCOM", [F_QMIN, F_QMAX])]
@@ -282,6 +284,7 @@ def controls_for(step, data, parpel_scenarios=(), pde_scenarios=()):
 def controls_for_edit(field, data, parpel_scenarios=(), pde_scenarios=()):
     """Controls for re-asking ONE parameter from the study panel."""
     data = data or {}
+    field = field.partition("#")[0]   # "bess_mva#1": parameter of a confirmed BESS
     if field == "db":
         return [_buttons(*DB_OPTIONS)]
     if field == "years":

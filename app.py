@@ -5,7 +5,7 @@ import re
 import uuid
 import unicodedata
 import streamlit as st
-from agents.pwf_agent import generate_dbar_block, generate_statcom_block, generate_contingency_block
+from agents.pwf_agent import generate_bess_block, generate_statcom_block, generate_contingency_block
 from utils.anarede_lib import COUPLING_LINE_X_PCT
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
 from agents.network_builder import (
@@ -2118,34 +2118,141 @@ def _parse_active_power(text: str):
     return None
 
 
-def _bess_pwf_lines(data: dict) -> str:
-    bus_from   = data.get("bess_bus", "")         # existing bus (bus_from)
-    bus_to     = data.get("bess_bus_number", "")  # new BESS bus (bus_to)
-    mva        = data.get("bess_mva", "100")
-    mode_type  = "1" if data.get("bess_mode") == "PV" else "0"
+def _bess_device_args(dev: dict) -> dict:
+    """generate_bess_block arguments for one BESS (sim_data keys bess_*)."""
     try:
-        s = float(mva)
+        s = float(dev.get("bess_mva", "100"))
     except Exception:
         s = 100.0
     try:
-        p = float(data["bess_p_mw"]) if data.get("bess_p_mw") is not None else 0.0
+        p = float(dev["bess_p_mw"]) if dev.get("bess_p_mw") is not None else 0.0
     except Exception:
         p = 0.0
+    return {"bus_number": dev.get("bess_bus", ""),            # existing bus (bus_from)
+            "bess_bus_number": dev.get("bess_bus_number", ""),  # new BESS bus (bus_to)
+            "bus_type": "1" if dev.get("bess_mode") == "PV" else "0",
+            "S_mva": s, "P_mw": p}
 
-    # DBAR + DLIN + FIM — generated entirely by anarede_lib, no LLM involvement
-    pwf_block = generate_dbar_block(
-        bus_number=bus_from,
-        bess_bus_number=bus_to,
-        bus_type=mode_type,
-        S_mva=s,
-        P_mw=p,
-    )
+
+def _bess_devices(data: dict) -> list:
+    """Every BESS of the study: the ones already confirmed, then the current one."""
+    return list(data.get("bess_extra") or []) + [{k: data[k] for k in _BESS_KEYS if k in data}]
+
+
+def _bess_pwf_lines(data: dict) -> str:
+    # DBAR + DLIN + FIM for every BESS of the study, in one file — generated
+    # entirely by anarede_lib, no LLM involvement
+    pwf_block = generate_bess_block([_bess_device_args(d) for d in _bess_devices(data)])
     return (
         "Copie as linhas abaixo em um editor de texto (ex: Bloco de Notas), "
         "salve como **BESS_modificacao.pwf** e carregue no ANAREDE:\n\n"
         f"```\n"
         f"{pwf_block}\n"
         f"```"
+    )
+
+
+# ── Several BESS in one study (v6.5.1) ────────────────────────────────────────
+# The BESS being entered keeps the flat keys (bess_bus, bess_mode, bess_mva,
+# bess_p_mw, bess_bus_number); BESS already confirmed go to sim_data["bess_extra"]
+# (same keys). One study → one file with every BESS.
+_BESS_KEYS = ("bess_bus", "bess_mode", "bess_mva", "bess_p_mw", "bess_bus_number")
+_BESS_MAX = 10
+_BESS_GENERATE = "Gerar arquivo agora"
+_BESS_ADD = "Adicionar outra BESS"
+
+
+def _bess_bus_conflict(data: dict, number, kind: str, skip=None):
+    """
+    Message when `number` clashes with a bus already entered in this study, else None.
+    kind 'new': a new BESS bus must differ from the other BESS's new buses and from
+    every existing (connection) bus entered; kind 'existing': a connection bus must
+    not be any BESS's new bus. skip: index of the device being entered/edited
+    (len(bess_extra) = the current device) — its own previous value is ignored.
+    """
+    devices = _bess_devices(data)
+    number = str(number).strip()
+    for i, dev in enumerate(devices):
+        if kind == "new" and i == skip:
+            continue
+        if str(dev.get("bess_bus_number", "")).strip() == number:
+            return (f"A barra **{number}** já é a nova barra da **BESS {i + 1}** neste estudo. "
+                    + ("Cada BESS precisa de uma nova barra diferente." if kind == "new"
+                       else "Informe uma barra existente do caso."))
+    if kind == "new":
+        for i, dev in enumerate(devices):
+            if str(dev.get("bess_bus", "")).strip() == number:
+                return (f"A barra **{number}** é uma barra existente informada neste estudo "
+                        f"(barra de conexão da **BESS {i + 1}**). A nova barra precisa ser um número "
+                        "que não exista no caso.")
+    return None
+
+
+def _bess_summary_line(i: int, dev: dict) -> str:
+    return (f"BESS {i + 1}: barra **{dev.get('bess_bus')}** → nova barra **{dev.get('bess_bus_number')}**, "
+            f"**{dev.get('bess_mva')} MVA**, P = **{dev.get('bess_p_mw')} MW**, modo **{dev.get('bess_mode')}**")
+
+
+def _bess_more_question(data: dict) -> str:
+    n = len(data.get("bess_extra") or []) + 1
+    return _ux.with_details(
+        f"Nova barra da BESS: **{data['bess_bus_number']}** — {_bess_summary_line(n - 1, data)}.\n\n"
+        "**Deseja inserir outra BESS neste estudo?**",
+        "Cada BESS ganha a sua própria nova barra e linha de acoplamento; todas vão para o "
+        f"mesmo arquivo .pwf. Limite: {_BESS_MAX} BESS por estudo."
+    )
+
+
+def _bess_generate_reply(data: dict) -> str:
+    """STEP8 → STEP9: the file with every BESS + save instructions."""
+    extras = data.get("bess_extra") or []
+    st.session_state.sim_step = "STEP9"
+    if extras:
+        devices = _bess_devices(data)
+        head = (f"**{len(devices)} BESS** neste estudo:\n\n"
+                + "\n".join(f"- {_bess_summary_line(i, d)}" for i, d in enumerate(devices)) + "\n\n")
+    else:
+        head = (f"Barra da BESS: **{data['bess_bus_number']}** — "
+                f"Potência nominal: **{data['bess_mva']} MVA**.\n\n")
+    return (
+        head
+        + _bess_pwf_lines(data)
+        + "\n\n---\n\n"
+        "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
+        "No ANAREDE:\n"
+        "1. Vá em **Histórico > Operações**\n"
+        "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
+        "3. Clique em **Salvar**\n\n"
+        "Confirme quando o caso estiver salvo."
+        + _ux.DETAILS_SEP
+        + _BESS_AMARELO_NOTE
+    )
+
+
+def _bess_more_choice(data: dict, user_text: str) -> str:
+    """STEP8 after the new bus number: generate the file now or add another BESS."""
+    t = user_text.strip().lower()
+    add = any(w in t for w in ("adicionar", "outra", "mais", "add")) or t in ("sim", "s")
+    gen = any(w in t for w in ("gerar", "agora", "não", "nao")) or t == "n"
+    if gen and not add:
+        return _bess_generate_reply(data)
+    if add and not gen:
+        n = len(data.get("bess_extra") or []) + 1
+        if n >= _BESS_MAX:
+            return (f"Limite de **{_BESS_MAX} BESS** por estudo atingido.\n\n"
+                    f"Clique em **{_BESS_GENERATE}** para gerar o arquivo com as {n} BESS.")
+        data.setdefault("bess_extra", []).append({k: data.pop(k) for k in _BESS_KEYS if k in data})
+        st.session_state.sim_step = "STEP7"
+        return _ux.with_details(
+            f"BESS {n} registrada.\n\n"
+            f"**BESS {n + 1}.** Qual é a barra onde deseja inserir a BESS?",
+            "Pode ser a mesma barra de uma BESS anterior; a nova barra de cada BESS é que "
+            "precisa ser diferente."
+        )
+    return (
+        "**Deseja inserir outra BESS neste estudo?**\n\n"
+        f"- **{_BESS_GENERATE}** — gera um único arquivo com as BESS informadas\n"
+        f"- **{_BESS_ADD}** — informa a barra, o modo, a potência e a nova barra da próxima BESS"
     )
 
 
@@ -2381,6 +2488,8 @@ def _current_step_question() -> str:
             return "**Qual a potência nominal da BESS em MVA?**"
         if "bess_p_mw" not in data:
             return "**Qual a potência ativa em MW?**"
+        if "bess_bus_number" in data:
+            return "**Deseja inserir outra BESS neste estudo?**"
         return (
             "Qual número de barra está disponível no seu caso para a nova barra "
             "da BESS? (escolha um número que não exista no caso atual)"
@@ -2929,6 +3038,10 @@ def _handle_sim_state(user_text: str) -> str | None:
                         "Não identifiquei a barra. Por favor, informe apenas o número "
                         "ou nome da barra onde deseja inserir a BESS."
                     )
+            clash = _bess_bus_conflict(data, data["bess_bus"], "existing") if data.get("bess_extra") else None
+            if clash:
+                data.pop("bess_bus", None)
+                return clash + "\n\nQual é a barra existente onde deseja inserir a BESS?"
             bus = data["bess_bus"]
             # Fast-forward to STEP8 if mode also provided in the same message
             mode = _parse_bess_mode(user_text)
@@ -3056,6 +3169,9 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Qual número de barra está disponível no seu caso para a nova barra da BESS?\n\n"
                 "(escolha um número que não exista no caso atual)"
             )
+        elif "bess_bus_number" in data:
+            # Sub-step 8d: generate the file now, or add another BESS (v6.5.1)
+            return _bess_more_choice(data, user_text)
         else:
             # Sub-step 8c: both S_mva and P_mw confirmed — collect new BESS bus number
             bus_num_match = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
@@ -3064,24 +3180,11 @@ def _handle_sim_state(user_text: str) -> str | None:
                     "Não identifiquei o número da barra. "
                     "Por favor, informe um número de barra disponível (ex: **9999**)."
                 )
+            clash = _bess_bus_conflict(data, bus_num_match.group(1), "new")
+            if clash:
+                return clash + "\n\nInforme outro número para a nova barra da BESS."
             data["bess_bus_number"] = bus_num_match.group(1)
-            bus_to = data["bess_bus_number"]
-            mva = data["bess_mva"]
-            st.session_state.sim_step = "STEP9"
-            pwf_lines = _bess_pwf_lines(data)
-            return (
-                f"Barra da BESS: **{bus_to}** — Potência nominal: **{mva} MVA**.\n\n"
-                + pwf_lines
-                + "\n\n---\n\n"
-                "**Antes de rodar o fluxo de potência, salve o caso com a BESS incluída.**\n\n"
-                "No ANAREDE:\n"
-                "1. Vá em **Histórico > Operações**\n"
-                "2. No campo **'Caso'**, coloque um número diferente dos casos já existentes\n"
-                "3. Clique em **Salvar**\n\n"
-                "Confirme quando o caso estiver salvo."
-                + _ux.DETAILS_SEP
-                + _BESS_AMARELO_NOTE
-            )
+            return _bess_more_question(data)
 
     # ── STEP 9: waiting for save confirmation ─────────────────────────────────
     if step == "STEP9":
@@ -3490,7 +3593,7 @@ def _handle_sim_state(user_text: str) -> str | None:
         if scenario is not None:
             year = data["years"][data.get("year_idx", 0)]
             for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw",
-                        "bess_mode", "scenario"]:
+                        "bess_mode", "scenario", "bess_extra"]:
                 data.pop(key, None)
             data["scenario"] = scenario
             data["year"] = year
@@ -3501,7 +3604,7 @@ def _handle_sim_state(user_text: str) -> str | None:
         if any(kw in t for kw in ["sim", "outro", "continuar", "próximo", "proximo",
                                    "outro cenário", "outro cenario"]) or t.strip() in ("s", "sim"):
             data.pop("scenario", None)
-            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode"]:
+            for key in ["bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode", "bess_extra"]:
                 data.pop(key, None)
             st.session_state.sim_step = "STEP3"
             scenarios = _PARPEL_SCENARIOS if db == "ONS" else _PDE_SCENARIOS
@@ -3618,7 +3721,7 @@ _EDIT_LABELS = {
 }
 
 _DEVICE_KEYS = ("bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode",
-                "statcom_bus", "statcom_q_min", "statcom_q_max")
+                "statcom_bus", "statcom_q_min", "statcom_q_max", "bess_extra")
 _POST_PWF_STEPS = ("STEP9", "STEP10", "STEP11", "STEP11B", "STEP12")
 _CASE_LOADED_STEPS = ("STEP6", "STEP7", "STEP8", "STATCOM_STEP_Q", "STATCOM_STEP_CBUS") + _POST_PWF_STEPS
 _EDIT_CANCEL = ("cancelar", "cancela", "manter", "cancel")
@@ -3627,11 +3730,35 @@ _EDIT_PASSTHROUGH = ("quero simular", "iniciar simulação", "nova simulação",
 _EDIT_END = {"encerrar", "encerra", "finalizar", "finaliza", "terminar", "fim", "sair"}
 
 
+def _edit_field(field):
+    """'bess_mva#1' → ('bess_mva', 1): parameter of the confirmed BESS #1 (bess_extra[1]);
+    a plain field → (field, None): the current device / study parameter."""
+    base, _, idx = field.partition("#")
+    return base, (int(idx) if idx else None)
+
+
+def _edit_label(field):
+    base, idx = _edit_field(field)
+    return _EDIT_LABELS[base] + (f" da BESS {idx + 1}" if idx is not None else "")
+
+
+def _edit_target(field, data):
+    """The dict holding the edited parameter (the confirmed BESS, or sim_data)."""
+    _, idx = _edit_field(field)
+    if idx is None:
+        return data
+    extras = data.get("bess_extra") or []
+    return extras[idx] if 0 <= idx < len(extras) else None
+
+
 def _db_label(db):
     return "PAR/PEL (ONS)" if db == "ONS" else "PDE (EPE)"
 
 
 def _param_value(field, data):
+    base, idx = _edit_field(field)
+    if idx is not None:
+        return _param_value(base, _edit_target(field, data) or {})
     if field == "db":
         return _db_label(data.get("db"))
     if field == "years":
@@ -3651,6 +3778,7 @@ def _param_value(field, data):
 
 def _edit_question(field):
     data = st.session_state.sim_data
+    field = _edit_field(field)[0]
     if field == "db":
         return "Qual base de dados deseja utilizar? **EPE (PDE)** ou **ONS (PAR/PEL)**?"
     if field == "years":
@@ -3681,7 +3809,7 @@ def _start_edit(field):
     st.session_state["_edit_pending"] = {"field": field, "return_step": st.session_state.sim_step}
     data = st.session_state.sim_data
     _append_system_assistant_message(
-        f"✏️ **Alterar {_EDIT_LABELS[field].lower()}** (atual: **{_param_value(field, data)}**)\n\n"
+        f"✏️ **Alterar {_edit_label(field).lower()}** (atual: **{_param_value(field, data)}**)\n\n"
         f"{_edit_question(field)}\n\nDigite **cancelar** para manter o valor atual.",
         notice=True,
     )
@@ -3728,6 +3856,11 @@ def _kept_device_line(data):
         vals = (f"barra **{data['statcom_bus']}**, "
                 f"Qmin **{_si.fmt_num(data['statcom_q_min'])} Mvar**, "
                 f"Qmax **{_si.fmt_num(data['statcom_q_max'])} Mvar**")
+    elif data.get("bess_extra"):
+        devices = _bess_devices(data)
+        vals = f"**{len(devices)} BESS** (" + "; ".join(
+            f"barra **{d['bess_bus']}** → **{d['bess_bus_number']}**, modo **{d['bess_mode']}**, "
+            f"**{d['bess_mva']} MVA**, P = **{d['bess_p_mw']} MW**" for d in devices) + ")"
     else:
         vals = (f"barra **{data['bess_bus']}**, modo **{data['bess_mode']}**, "
                 f"**{data['bess_mva']} MVA**, P = **{data['bess_p_mw']} MW**")
@@ -3768,10 +3901,17 @@ def _handle_edit(user_text):
       (True, text)  → deterministic reply
     """
     ep = st.session_state["_edit_pending"]
-    field, step = ep["field"], st.session_state.sim_step
+    step = st.session_state.sim_step
     data = st.session_state.sim_data
     t = user_text.strip().lower()
-    label = _EDIT_LABELS[field]
+    label = _edit_label(ep["field"])
+    field, dev_idx = _edit_field(ep["field"])
+    target = _edit_target(ep["field"], data)
+    if target is None:   # that BESS no longer exists (study changed meanwhile)
+        st.session_state.pop("_edit_pending", None)
+        return False, None
+    # index of the edited BESS among all devices (the current one is the last)
+    skip = dev_idx if dev_idx is not None else len(data.get("bess_extra") or [])
 
     if t in _EDIT_CANCEL:
         st.session_state.pop("_edit_pending", None)
@@ -3842,37 +3982,45 @@ def _handle_edit(user_text):
         q = _current_step_question()
         return True, f"✏️ Título do caso alterado para **{title}**." + (f"\n\n{q}" if q else "")
 
-    # Device parameters — same parsers as STEP7 / STEP8 / STATCOM_STEP_Q
+    # Device parameters — same parsers as STEP7 / STEP8 / STATCOM_STEP_Q.
+    # BESS parameters go to `target`: the current BESS (sim_data) or a confirmed one.
     if field in ("bess_bus", "statcom_bus"):
         m = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
         value = m.group(1) if m else (user_text.strip() if 2 <= len(user_text.strip()) <= 50 else None)
         if value is None:
             return retry()
-        data[field] = value
+        if field == "bess_bus":
+            clash = _bess_bus_conflict(data, value, "existing", skip=skip)
+            if clash:
+                return retry(clash + "\n\n")
+        target[field] = value
         shown = value
     elif field == "bess_mode":
         mode = _parse_bess_mode(user_text)
         if mode is None:
             return retry()
-        data["bess_mode"] = mode
-        shown = _param_value("bess_mode", data)
+        target["bess_mode"] = mode
+        shown = _param_value("bess_mode", target)
     elif field == "bess_mva":
         mva = _parse_mva(user_text)
         if mva is None:
             return retry()
-        data["bess_mva"] = mva
+        target["bess_mva"] = mva
         shown = f"{mva} MVA"
     elif field == "bess_p_mw":
         p = _parse_p_mw(user_text)
         if p is None:
             return retry()
-        data["bess_p_mw"] = p
+        target["bess_p_mw"] = p
         shown = f"{p} MW"
     elif field == "bess_bus_number":
         m = re.search(r"(?<![.,\d])(\d{4,5})\b", user_text)
         if not m:
             return retry()
-        data["bess_bus_number"] = m.group(1)
+        clash = _bess_bus_conflict(data, m.group(1), "new", skip=skip)
+        if clash:
+            return retry(clash + "\n\n")
+        target["bess_bus_number"] = m.group(1)
         shown = m.group(1)
     elif field == "statcom_q":
         q_min, q_max = _parse_q_limits(user_text)
@@ -3909,10 +4057,17 @@ def _study_params(data):
         if "statcom_q_min" in data:
             out.append(("statcom_q", "Limites Q", _param_value("statcom_q", data)))
     else:
-        for f, lbl in (("bess_bus", "Barra"), ("bess_mode", "Modo"), ("bess_mva", "S"),
-                       ("bess_p_mw", "P"), ("bess_bus_number", "Nova barra")):
+        bess_fields = (("bess_bus", "Barra"), ("bess_mode", "Modo"), ("bess_mva", "S"),
+                       ("bess_p_mw", "P"), ("bess_bus_number", "Nova barra"))
+        extras = data.get("bess_extra") or []
+        for i, dev in enumerate(extras):   # BESS already confirmed: one group each
+            for f, lbl in bess_fields:
+                if f in dev:
+                    out.append((f"{f}#{i}", f"BESS {i + 1} · {lbl}", _param_value(f, dev)))
+        prefix = f"BESS {len(extras) + 1} · " if extras else ""
+        for f, lbl in bess_fields:
             if f in data:
-                out.append((f, lbl, _param_value(f, data)))
+                out.append((f, prefix + lbl, _param_value(f, data)))
     return out
 
 
@@ -4100,7 +4255,7 @@ with st.sidebar:
                     st.markdown(f"{_plabel}: **{_pval}**" + (" ✏️" if _editing and _field == _editing else ""))
                 with _c2:
                     if _field and st.session_state.sim_status == "active":
-                        st.button("✏️", key=f"edit_{_field}", help=f"Alterar {_EDIT_LABELS[_field].lower()}",
+                        st.button("✏️", key=f"edit_{_field}", help=f"Alterar {_edit_label(_field).lower()}",
                                   on_click=_start_edit, args=(_field,))
 
             if st.session_state.sim_status == "paused":
@@ -4636,7 +4791,11 @@ def _render_option_buttons(spec, mid, ci):
 def _on_form_submit(spec, base, sel_val):
     raw = {f["key"]: st.session_state.get(f"fld_{base}_{f['key']}")
            for f in _si.form_fields(spec, sel_val)}
-    errors, texts = _si.compose(spec, raw, sel_val, st.session_state.sim_data)
+    data = st.session_state.sim_data
+    ep = st.session_state.get("_edit_pending")
+    if ep and _edit_field(ep["field"])[1] is not None:   # ✏️ on a confirmed BESS: validate against it
+        data = _edit_target(ep["field"], data) or data
+    errors, texts = _si.compose(spec, raw, sel_val, data)
     if errors:
         st.session_state[f"form_err_{base}"] = errors   # shown inline, nothing is sent
         return

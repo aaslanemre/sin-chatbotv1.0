@@ -44,25 +44,38 @@ def generate_dbar_block(bus_number, bess_bus_number, bus_type, S_mva, P_mw):
     P_mw: float — active power in MW
     Returns combined DBAR + DLIN + FIM as a single string.
     """
-    q_min, q_max = calculate_q_limits(S_mva, P_mw)
+    return generate_bess_block([{"bus_number": bus_number, "bess_bus_number": bess_bus_number,
+                                 "bus_type": bus_type, "S_mva": S_mva, "P_mw": P_mw}])
+
+
+def generate_bess_block(devices):
+    """
+    One file for N BESS (v6.5.1): DBAR block with one new bus per device, DLIN
+    block with one coupling line per device (same single-device rules: tipo
+    PQ=0 / PV=1 in the DBAR, line operação A / estado L, empty TAP, reactance
+    COUPLING_LINE_X_PCT, R = B = 0), one 99999 per block, FIM at the end.
+    devices: list of dicts with the generate_dbar_block arguments.
+    """
+    limits = [calculate_q_limits(d["S_mva"], d["P_mw"]) for d in devices]
+    n = len(devices)
 
     # Generate DBAR
     Script_bat = []
     Script_Inclui_DBAR(
         Script_bat,
-        vet_numero=[bess_bus_number],
-        vet_operacao=['A'],
-        vet_estado=['L'],
-        vet_tipo=[bus_type],
+        vet_numero=[d["bess_bus_number"] for d in devices],
+        vet_operacao=['A'] * n,
+        vet_estado=['L'] * n,
+        vet_tipo=[d["bus_type"] for d in devices],
         vet_GBT=[],
-        vet_nome=['BESS'],
+        vet_nome=['BESS'] * n,
         vet_GLT=[],
         vet_Tensao=[],
         vet_Angulo=[],
-        vet_geracao_P=[int(round(float(P_mw)))],
+        vet_geracao_P=[int(round(float(d["P_mw"]))) for d in devices],
         vet_geracao_Q=[],
-        vet_limite_Q_min=[int(round(float(q_min)))],
-        vet_limite_Q_max=[int(round(float(q_max)))],
+        vet_limite_Q_min=[int(round(float(q_min))) for q_min, _ in limits],
+        vet_limite_Q_max=[int(round(float(q_max))) for _, q_max in limits],
         vet_Barra_Controlada=[],
         vet_carga_P=[],
         vet_carga_Q=[],
@@ -76,19 +89,19 @@ def generate_dbar_block(bus_number, bess_bus_number, bus_type, S_mva, P_mw):
     Script_lin = []
     Script_Inclui_DLIN(
         Script_lin,
-        vet_tipo=['L'],
-        vet_Barra_De=[bus_number],
-        vet_Abertura_De=[''],
-        vet_operacao=['A'],
-        vet_Barra_Para=[bess_bus_number],
-        vet_Abertura_Para=[''],
-        vet_circuito=['1'],
-        vet_estado=['L'],
-        vet_proprietario=[''],
-        vet_modo_controle=[''],
-        vet_resistencia=[0.0],
-        vet_reatancia=[COUPLING_LINE_X_PCT],
-        vet_suceptancia=[0.0],
+        vet_tipo=['L'] * n,
+        vet_Barra_De=[d["bus_number"] for d in devices],
+        vet_Abertura_De=[''] * n,
+        vet_operacao=['A'] * n,
+        vet_Barra_Para=[d["bess_bus_number"] for d in devices],
+        vet_Abertura_Para=[''] * n,
+        vet_circuito=['1'] * n,
+        vet_estado=['L'] * n,
+        vet_proprietario=[''] * n,
+        vet_modo_controle=[''] * n,
+        vet_resistencia=[0.0] * n,
+        vet_reatancia=[COUPLING_LINE_X_PCT] * n,
+        vet_suceptancia=[0.0] * n,
         vet_tap=[],
         vet_tap_min=[],
         vet_tap_max=[],

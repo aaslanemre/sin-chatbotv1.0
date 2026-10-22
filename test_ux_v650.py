@@ -237,7 +237,7 @@ def downloads():
 bess_data = {"sim_type": "BESS", "db": "ONS", "years": [2028], "year_idx": 0, "year": 2028,
              "scenario": "Inverno Máxima Diurna", "bess_bus": "1001", "bess_mode": "PV",
              "bess_mva": "100", "bess_p_mw": "80"}
-fresh(None, step="STEP8", data=bess_data, status="active"); run(); run("9999")
+fresh(None, step="STEP8", data=bess_data, status="active"); run(); run("9999"); run("Gerar arquivo agora")  # v6.5.1
 m = last_assistant()
 expected = generate_dbar_block(bus_number="1001", bess_bus_number="9999", bus_type="1", S_mva=100.0, P_mw=80.0)
 blocks = code_blocks(m["content"])

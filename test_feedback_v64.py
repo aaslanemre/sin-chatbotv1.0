@@ -62,6 +62,7 @@ for m in ["agents.pwf_agent", "agents.results_analyzer", "memory.session_memory"
           "prompts.system_prompt", "rag.chain"]:
     sys.modules[m] = types.ModuleType(m)
 sys.modules["agents.pwf_agent"].generate_dbar_block = lambda **kw: ""
+sys.modules["agents.pwf_agent"].generate_bess_block = lambda *a, **kw: ""  # v6.5.1
 sys.modules["agents.pwf_agent"].generate_statcom_block = lambda **kw: ""
 sys.modules["agents.pwf_agent"].generate_contingency_block = lambda *a, **kw: ""
 sys.modules["agents.results_analyzer"].save_results_file = lambda *a, **kw: None
