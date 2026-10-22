@@ -4,7 +4,38 @@ No Streamlit imports — fully unit-testable.
 """
 
 import math
-from utils.anarede_lib import Script_Inclui_DBAR, Script_Inclui_DLIN
+from utils.anarede_lib import (
+    Script_Inclui_DBAR, Script_Inclui_DLIN, field_text, rounds_to_zero,
+    COUPLING_LINE_X_PCT, DLIN_R_WIDTH, DLIN_X_WIDTH, DLIN_S_WIDTH,
+)
+
+
+# ── DLIN values as written in the file ───────────────────────────────────────
+
+_DLIN_FIELDS = (("R", "r_pct", DLIN_R_WIDTH), ("X", "x_pct", DLIN_X_WIDTH), ("Q", "q_mvar", DLIN_S_WIDTH))
+
+
+def dlin_written(r_pct, x_pct, q_mvar):
+    """{'R', 'X', 'Q'} → text exactly as written in the DLIN fields (rounded to fit, ≤ 4 decimals)."""
+    vals = {"r_pct": r_pct, "x_pct": x_pct, "q_mvar": q_mvar}
+    return {lbl: field_text(vals[key], width) for lbl, key, width in _DLIN_FIELDS}
+
+
+def dlin_zero_fields(r_pct, x_pct, q_mvar):
+    """Labels ('R', 'X', 'Q') of non-zero values that the 4-decimal limit writes as 0."""
+    vals = {"r_pct": r_pct, "x_pct": x_pct, "q_mvar": q_mvar}
+    return [lbl for lbl, key, width in _DLIN_FIELDS if rounds_to_zero(vals[key], width)]
+
+
+def zero_warning(lbl):
+    return f"valor {lbl} arredondado para 0 — verifique."
+
+
+def _written_note(r_pct, x_pct, q_mvar):
+    w = dlin_written(r_pct, x_pct, q_mvar)
+    warn = [f"⚠️ {zero_warning(lbl)}" for lbl in dlin_zero_fields(r_pct, x_pct, q_mvar)]
+    line = f"**Valores para o DLIN:** R = {w['R']} %, X = {w['X']} %, Q = {w['Q']} Mvar"
+    return line + ("\n\n" + "\n".join(warn) if warn else "")
 
 
 # ── A) Conversion engine ──────────────────────────────────────────────────────
@@ -61,6 +92,7 @@ def convert_line_params(kv, mode, values, length_km=None, base_mva=100.0):
         # Verification: 5.4542e-6 S/km × 180 km = 9.8176e-4 S
         # Q = 9.8176e-4 × 230² = 9.8176e-4 × 52900 ≈ 51.93 Mvar  ✓
         q_mvar = b_total_s * (kv ** 2)
+        w = dlin_written(r_pct, x_pct, q_mvar)
 
         calc_str = (
             f"**Conversão de parâmetros por km → DLIN**\n\n"
@@ -76,10 +108,10 @@ def convert_line_params(kv, mode, values, length_km=None, base_mva=100.0):
             f"X_total = {x_okm} × {L} = **{x_total:.4f} Ω**\n"
             f"B_total = {b_uskm} × 10⁻⁶ × {L} = **{b_total_s:.6e} S**\n\n"
             f"**Passo 3 — Conversão para o DLIN:**\n"
-            f"R% = (R_total / Zbase) × 100 = ({r_total:.4f} / {zbase:.4f}) × 100 = **{r_pct:.4f} %**\n"
-            f"X% = (X_total / Zbase) × 100 = ({x_total:.4f} / {zbase:.4f}) × 100 = **{x_pct:.4f} %**\n"
-            f"Q = B_total × kV² = {b_total_s:.6e} × {kv}² = **{q_mvar:.4f} Mvar**\n\n"
-            f"**Valores para o DLIN:** R = {r_pct:.4f} %, X = {x_pct:.4f} %, Q = {q_mvar:.4f} Mvar"
+            f"R% = (R_total / Zbase) × 100 = ({r_total:.4f} / {zbase:.4f}) × 100 = **{w['R']} %**\n"
+            f"X% = (X_total / Zbase) × 100 = ({x_total:.4f} / {zbase:.4f}) × 100 = **{w['X']} %**\n"
+            f"Q = B_total × kV² = {b_total_s:.6e} × {kv}² = **{w['Q']} Mvar**\n\n"
+            + _written_note(r_pct, x_pct, q_mvar)
         )
 
     elif mode == "pu":
@@ -90,16 +122,17 @@ def convert_line_params(kv, mode, values, length_km=None, base_mva=100.0):
         r_pct = r_pu * 100.0
         x_pct = x_pu * 100.0
         q_mvar = b_pu * base_mva
+        w = dlin_written(r_pct, x_pct, q_mvar)
 
         calc_str = (
             f"**Conversão de parâmetros em pu → DLIN**\n\n"
             f"Dados de entrada (base {base_mva} MVA, {kv} kV):\n"
             f"- R = {r_pu} pu, X = {x_pu} pu, B = {b_pu} pu\n\n"
             f"**Conversão:**\n"
-            f"R% = R_pu × 100 = {r_pu} × 100 = **{r_pct:.4f} %**\n"
-            f"X% = X_pu × 100 = {x_pu} × 100 = **{x_pct:.4f} %**\n"
-            f"Q = B_pu × Sbase = {b_pu} × {base_mva} = **{q_mvar:.4f} Mvar**\n\n"
-            f"**Valores para o DLIN:** R = {r_pct:.4f} %, X = {x_pct:.4f} %, Q = {q_mvar:.4f} Mvar"
+            f"R% = R_pu × 100 = {r_pu} × 100 = **{w['R']} %**\n"
+            f"X% = X_pu × 100 = {x_pu} × 100 = **{w['X']} %**\n"
+            f"Q = B_pu × Sbase = {b_pu} × {base_mva} = **{w['Q']} Mvar**\n\n"
+            + _written_note(r_pct, x_pct, q_mvar)
         )
 
     elif mode == "pct":
@@ -112,10 +145,15 @@ def convert_line_params(kv, mode, values, length_km=None, base_mva=100.0):
         if x_pct <= 0:
             raise ValueError("X% deve ser positivo.")
 
+        w = dlin_written(r_pct, x_pct, q_mvar)
+        typed = {"R": r_pct, "X": x_pct, "Q": q_mvar}
+        changed = [f"{k} informado {typed[k]}" for k in ("R", "X", "Q") if float(w[k]) != typed[k]]
         calc_str = (
             f"**Parâmetros já em formato DLIN (pass-through)**\n\n"
-            f"R = **{r_pct} %**, X = **{x_pct} %**, Q = **{q_mvar} Mvar**\n\n"
-            f"Nenhuma conversão necessária. Valores utilizados diretamente no DLIN."
+            f"Nenhuma conversão necessária. Valores utilizados diretamente no DLIN"
+            + (f" (arredondados ao limite de 4 casas decimais: {', '.join(changed)})" if changed else "")
+            + ".\n\n"
+            + _written_note(r_pct, x_pct, q_mvar)
         )
 
     else:
@@ -306,7 +344,7 @@ def validate_network(network):
                 "severity": "warning",
                 "message": f"Linha {line['id']}: X% = {x:.4f} % muito pequeno (< 0.01 %).",
                 "why_it_matters": "Reatâncias muito pequenas podem causar mal-condicionamento numérico no ANAREDE.",
-                "how_to_fix": f"Verifique os dados da linha {line['id']}. Se for uma linha de acoplamento (ex: BESS), use X = 0.00001 % como mínimo.",
+                "how_to_fix": f"Verifique os dados da linha {line['id']}. Se for uma linha de acoplamento (ex: BESS), use X = {field_text(COUPLING_LINE_X_PCT, DLIN_X_WIDTH)} % como mínimo.",
                 "target": line["id"],
             })
         if x > 100:
@@ -326,6 +364,30 @@ def validate_network(network):
                     "why_it_matters": "Linhas de transmissão de alta tensão têm tipicamente X/R alto. Razão baixa pode indicar dados invertidos.",
                     "how_to_fix": f"Verifique se os valores de R e X da linha {line['id']} não estão trocados.",
                     "target": line["id"],
+                })
+
+    # 10 — Non-zero values written as zero by the 4-decimal limit (DLIN) or by the
+    #      integer MW/Mvar fields (DBAR)
+    for line in lines:
+        for lbl in dlin_zero_fields(line.get("r_pct", 0), line.get("x_pct", 0), line.get("q_mvar", 0)):
+            issues.append({
+                "severity": "warning",
+                "message": f"Linha {line['id']}: {zero_warning(lbl)}",
+                "why_it_matters": "O ANAREDE aceita no máximo 4 casas decimais; o valor será gravado como 0 no arquivo.",
+                "how_to_fix": f"Confira os parâmetros da linha {line['id']}.",
+                "target": line["id"],
+            })
+    for b in buses:
+        for lbl, key in (("Pg", "p_gen_mw"), ("Qmin", "q_min_mvar"), ("Qmax", "q_max_mvar"),
+                         ("Pl", "p_load_mw"), ("Ql", "q_load_mvar")):
+            v = b.get(key, 0) or 0
+            if v != 0 and int(round(v)) == 0:
+                issues.append({
+                    "severity": "warning",
+                    "message": f"Barra {b['number']}: {zero_warning(lbl)}",
+                    "why_it_matters": "O campo do DBAR é gravado em MW/Mvar inteiros; o valor será gravado como 0 no arquivo.",
+                    "how_to_fix": f"Confira os dados da barra {b['number']}.",
+                    "target": b["number"],
                 })
 
     return issues
@@ -556,11 +618,11 @@ def format_network_summary(network):
             "|---|----|----- |------|----|----|----------|",
         ]
         for ln in lines:
+            w = dlin_written(ln.get("r_pct", 0), ln.get("x_pct", 0), ln.get("q_mvar", 0))
             lines_out.append(
                 f"| {ln['id']} | {ln['from_bus']} | {ln['to_bus']} "
                 f"| {ln.get('circuit',1)} "
-                f"| {ln.get('r_pct',0):.4f} | {ln.get('x_pct',0):.4f} "
-                f"| {ln.get('q_mvar',0):.4f} |"
+                f"| {w['R']} | {w['X']} | {w['Q']} |"
             )
 
     return "\n".join(lines_out)

@@ -417,7 +417,7 @@ After user provides bus:
 
 "Para inserir a BESS nessa barra, recomenda-se criar uma nova
 barra que representará a bateria e conectá-la à barra desejada
-por uma linha de transmissão com reatância de 0.00001% (praticamente zero)
+por uma linha de transmissão com reatância de 0.0001% (praticamente zero)
 (resistência e susceptância zeradas).
 
 Qual o modo de operação da BESS?
@@ -554,7 +554,7 @@ DBAR
 NNNNN 0 1 NOME_BARRA       VBASE  0  0  0  PGEN  QMAX  QMIN  V
 99999
 DLIN
-BARRA1 BARRA2  0  .00001  0  0
+BARRA1 BARRA2  0  0.0001  0  0
 99999
 FIM
 ```
@@ -598,7 +598,7 @@ sem converter (pu × 100 = %) e rotular corretamente.
   Certo:  "se você tem X = 0.10 pu (base 100 MVA), no DLIN
            informe X = 10%"
 Nota: no fluxo guiado da BESS, a linha de acoplamento usa
-reatância desprezível — o valor .00001 no campo X do DLIN
+reatância desprezível — o valor 0.0001 no campo X do DLIN
 está em % (ou seja, praticamente zero), sem TAP.
 
 REGRA DLIN-3 — O campo de susceptância do DLIN é Q em Mvar,

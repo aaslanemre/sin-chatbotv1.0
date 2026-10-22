@@ -78,11 +78,14 @@ def _session_table_row(s, summ):
     }
 
 
+BUBBLE_CHARS = 1000
+
+
 def _bubble(role, name, step, text):
     color, border = ("#1a1a2e", "#F97316") if role == "user" else ("#16213e", "#4CAF50")
     icon = "👤" if role == "user" else "🤖"
     step_html = f' <span style="color:#888;">({html.escape(step)})</span>' if step else ""
-    body = html.escape(text[:1000]).replace("\n", "<br>")
+    body = html.escape(text[:BUBBLE_CHARS]).replace("\n", "<br>")
     st.markdown(
         f'<div style="background:{color};padding:10px 14px;border-radius:12px;'
         f'margin:4px 0;border-left:3px solid {border};">'
@@ -135,6 +138,10 @@ def _render_transcript(sess, messages, feedback, update_fn):
         who = (entry.get("full_name") or sess.get("full_name") or "Usuario") \
             if entry["role"] == "user" else "Assistente"
         _bubble(entry["role"], who, entry.get("sim_step"), entry["message"])
+        if len(entry["message"] or "") > BUBBLE_CHARS:
+            # chat_logs keeps the full text; the bubble shows the first characters only
+            with st.expander("Ver mensagem completa (formatada)"):
+                st.markdown(entry["message"])
         gcap = grounding_caption(entry.get("grounding_level"), entry.get("grounding_score")) \
             if entry["role"] == "assistant" else ""
         src = INPUT_SOURCE_LABELS.get(entry.get("input_source")) if entry["role"] == "user" else None

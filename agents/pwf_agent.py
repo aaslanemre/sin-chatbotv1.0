@@ -13,6 +13,8 @@ from utils.anarede_lib import (
     Script_Inclui_DLIN,
     Script_Inclui_DCER,
     calculate_q_limits,
+    format_ansi_field,
+    COUPLING_LINE_X_PCT,
 )
 
 MODIFIED_DIR = Path(MODIFIED_PWF_DIR)
@@ -85,7 +87,7 @@ def generate_dbar_block(bus_number, bess_bus_number, bus_type, S_mva, P_mw):
         vet_proprietario=[''],
         vet_modo_controle=[''],
         vet_resistencia=[0.0],
-        vet_reatancia=[0.00001],
+        vet_reatancia=[COUPLING_LINE_X_PCT],
         vet_suceptancia=[0.0],
         vet_tap=[],
         vet_tap_min=[],
@@ -177,16 +179,16 @@ def generate_contingency_block(contingencies):
     """
     lines = ['DCTG']
     for c in contingencies:
-        id_str = str(c['id']).rjust(4)
+        id_str = format_ansi_field(int(c['id']), 4)
         name = c.get('name', f"CTG{c['id']}")[:46]
         lines.append(f"{id_str}   {name}")
         if c['type'] == 'line':
-            bf = str(c['bus_from']).rjust(5)
-            bt = str(c['bus_to']).rjust(5)
-            ci = str(c.get('circuit', 1)).rjust(2)
+            bf = format_ansi_field(int(c['bus_from']), 5)
+            bt = format_ansi_field(int(c['bus_to']), 5)
+            ci = format_ansi_field(int(c.get('circuit', 1)), 2)
             lines.append(f"CIRD {bf} {bt} {ci}")
         elif c['type'] == 'generator':
-            b = str(c['bus']).rjust(5)
+            b = format_ansi_field(int(c['bus']), 5)
             lines.append(f"GERA  {b}")
         lines.append('FCAS')
     lines.append('99999')

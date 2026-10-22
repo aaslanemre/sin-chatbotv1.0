@@ -1,9 +1,25 @@
 # Single source of truth for the app version (user sidebar, admin sidebar, feedback rows).
-APP_VERSION = "v6.5.0"
+APP_VERSION = "v6.5.1"
 
 # "Novidades da versão" banner shown once per version per user (users.last_seen_version).
 # PT-BR, user-facing. Entries marked DRAFT must be reviewed before deploy.
 RELEASE_NOTES = {
+    "v6.5.1": {
+        "status": "DRAFT — review before deploy",
+        "novidades": [
+            "Arquivos .pwf: nenhum valor numérico passa de 4 casas decimais nem da largura "
+            "do campo; a linha de acoplamento da BESS usa a menor reatância diferente de "
+            "zero que cabe nesse limite.",
+            "Na rede montada do zero, a conversão e a tabela de revisão mostram os valores "
+            "exatamente como serão gravados no DLIN.",
+            "Pedidos como “quero modelar uma BESS” ou “modelar bess” iniciam a simulação guiada.",
+        ],
+        "o_que_testar": [
+            "Gere o .pwf de uma BESS e carregue no ANAREDE: o DLIN deve ser aceito sem erro.",
+            "Monte uma rede do zero com a linha de 230 kV / 180 km e compare a tabela com o arquivo.",
+            "Digite “quero modelar uma bess” e “como modelar uma BESS no ANAREDE?” e compare.",
+        ],
+    },
     "v6.5.0": {
         "status": "DRAFT — review before deploy",
         "novidades": [

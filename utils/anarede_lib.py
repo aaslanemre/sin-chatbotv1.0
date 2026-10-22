@@ -1,4 +1,74 @@
 import math
+import re
+
+# ── Fixed-width numeric fields ────────────────────────────────────────────────
+# Hard limit of the ANAREDE version in use (confirmed by the domain experts): a
+# numeric field never carries more than 4 digits after the decimal point.
+MAX_DECIMALS = 4
+
+# Accepted by the product owner: smallest non-zero value within ANAREDE's
+# 4-decimal limit; the earlier value 0.00001 cannot be written.
+COUPLING_LINE_X_PCT = 0.0001
+
+# DLIN transmission-line (LT) field widths written by Script_adiciona_LT.
+DLIN_R_WIDTH, DLIN_X_WIDTH, DLIN_S_WIDTH = 6, 8, 6
+
+
+def format_ansi_field(value, width, max_decimals=MAX_DECIMALS):
+    """
+    Text of one numeric field of an ANAREDE record, right-justified in `width`.
+
+    - never longer than `width` and never more than `max_decimals` (at most 4)
+      digits after the decimal point: the value is rounded to fit;
+    - never scientific notation;
+    - an int (or a text without a decimal point, e.g. "417") is written as an
+      integer; any other value keeps an explicit decimal point ("12." if no
+      decimal fits);
+    - None or "" → blank field.
+    Raises ValueError when the value cannot be written in the field at all.
+    """
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return " " * width
+    if isinstance(value, bool):
+        raise ValueError(f"Valor inválido para campo numérico: {value!r}")
+    max_decimals = max(0, min(int(max_decimals), MAX_DECIMALS))
+    text = str(value).strip().replace(",", ".")
+    if isinstance(value, int) or (isinstance(value, str) and re.fullmatch(r"[-+]?\d+", text)):
+        s = str(int(text))
+        if len(s) > width:
+            raise ValueError(f"O valor {value} não cabe no campo de {width} colunas do ANAREDE.")
+        return s.rjust(width)
+    v = float(text)  # ValueError for non-numeric text
+    if not math.isfinite(v):
+        raise ValueError(f"Valor inválido para campo numérico: {value!r}")
+    for decimals in range(max_decimals, -1, -1):
+        s = f"{v:.{decimals}f}" + ("" if decimals else ".")
+        if float(s) == 0:
+            s = s.lstrip("-")
+        if len(s) <= width:
+            return s.rjust(width)
+    raise ValueError(f"O valor {value} não cabe no campo de {width} colunas do ANAREDE.")
+
+
+def field_text(value, width, max_decimals=MAX_DECIMALS):
+    """The value exactly as written in the field, without padding (for user-facing text)."""
+    return format_ansi_field(value, width, max_decimals).strip()
+
+
+def rounds_to_zero(value, width, max_decimals=MAX_DECIMALS):
+    """True when a non-zero value is written as zero in the field."""
+    try:
+        v = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return False
+    return v != 0 and float(field_text(value, width, max_decimals)) == 0
+
+
+def _valores_brutos(vetor, n):
+    """Copy of a vector padded with "": numbers keep full precision until formatted."""
+    v = list(vetor or [])
+    return v + [""] * (n - len(v))
+
 
 def Script_Inclui_DBAR(Script,
                        vet_numero,
@@ -22,6 +92,10 @@ def Script_Inclui_DBAR(Script,
                        vet_Tensao_def_carga):
 
     n_bar = len(vet_numero)
+    bruto = {nome: _valores_brutos(vet, n_bar) for nome, vet in (
+        ("Pg", vet_geracao_P), ("Qg", vet_geracao_Q), ("Qn", vet_limite_Q_min),
+        ("Qm", vet_limite_Q_max), ("Bc", vet_Barra_Controlada), ("Pl", vet_carga_P),
+        ("Ql", vet_carga_Q), ("Sh", vet_Banco_Cap_Reat))}
 
     vet_numero = formatar_argumentos(vet_numero, n_bar, 5)
     vet_operacao = formatar_argumentos(vet_operacao, n_bar, 1)
@@ -58,27 +132,20 @@ def Script_Inclui_DBAR(Script,
         GLT = str(vet_GLT[k]).rjust(2)[:2]
         Tensao = str(vet_Tensao[k])[:10]
         Angulo = str(vet_Angulo[k])[:10]
-        geracao_P = str(vet_geracao_P[k])[:10]
-        geracao_Q = str(vet_geracao_Q[k])[:10]
-        limite_Q_min = str(vet_limite_Q_min[k])[:10]
-        limite_Q_max = str(vet_limite_Q_max[k])[:10]
-        Barra_Controlada = str(vet_Barra_Controlada[k]).rjust(6)[:6]
-        carga_P = str(vet_carga_P[k])[:10]
-        carga_Q = str(vet_carga_Q[k])[:10]
-        Banco_Cap_Reat = str(vet_Banco_Cap_Reat[k])[:10]
         Area = str(vet_Area[k]).rjust(3)[:3]
         Tensao_def_carga = str(vet_Tensao_def_carga[k])[:10]
 
+        # V, A and Vf keep the implicit-decimal convention of the DBAR ruler.
         Tensao = formatar_digitos_pimplic(Tensao, 4)
         Angulo = formatar_digitos_pimplic(Angulo, 4)
-        geracao_P = formatar_digitos_pexplic(geracao_P, 5)
-        geracao_Q = formatar_digitos_pexplic(geracao_Q, 5)
-        limite_Q_min = formatar_digitos_pexplic(limite_Q_min, 5)
-        limite_Q_max = formatar_digitos_pexplic(limite_Q_max, 5)
-        Barra_Controlada = formatar_digitos_pexplic(Barra_Controlada, 6)
-        carga_P = formatar_digitos_pexplic(carga_P, 5)
-        carga_Q = formatar_digitos_pexplic(carga_Q, 5)
-        Banco_Cap_Reat = formatar_digitos_pexplic(Banco_Cap_Reat, 5)
+        geracao_P = format_ansi_field(bruto["Pg"][k], 5)
+        geracao_Q = format_ansi_field(bruto["Qg"][k], 5)
+        limite_Q_min = format_ansi_field(bruto["Qn"][k], 5)
+        limite_Q_max = format_ansi_field(bruto["Qm"][k], 5)
+        Barra_Controlada = format_ansi_field(bruto["Bc"][k], 6)
+        carga_P = format_ansi_field(bruto["Pl"][k], 5)
+        carga_Q = format_ansi_field(bruto["Ql"][k], 5)
+        Banco_Cap_Reat = format_ansi_field(bruto["Sh"][k], 5)
         Tensao_def_carga = formatar_digitos_pimplic(Tensao_def_carga, 4)
 
         Script_adiciona_barra(linhas, numero, operacao, estado,
@@ -131,31 +198,15 @@ def formatar_digitos_pimplic(elemento, tamanho):
 
 
 def formatar_digitos_pexplic(elemento, tamanho):
+    # v6.5.1: explicit-decimal fields go through format_ansi_field (max 4 decimals,
+    # no exponential notation, never wider than the field). Non-numeric text keeps
+    # the old behaviour.
     texto = str(elemento).strip().replace(",", ".")
     try:
-        valor = float(texto)
+        float(texto)
     except ValueError:
         return texto[:tamanho].ljust(tamanho)
-
-    # Whole-number integers with no decimal point in input → right-justified integer, no decimal
-    if valor == int(valor) and '.' not in texto:
-        return str(int(valor)).rjust(tamanho)[:tamanho]
-
-    espaco_sinal = 1 if valor < 0 else 0
-    int_digitos = len(str(int(abs(valor))))
-    casas_decimais = tamanho - int_digitos - espaco_sinal - 1
-
-    if casas_decimais >= 0:
-        texto_formatado = f"{valor:.{casas_decimais}f}"
-        # Non-zero value rounds to zero in fixed notation → use exponential
-        if abs(valor) > 0 and float(texto_formatado) == 0.0:
-            texto_formatado = f"{valor:.0E}"
-        elif "." not in texto_formatado and len(texto_formatado) < tamanho:
-            texto_formatado += "."
-    else:
-        texto_formatado = f"{int(round(valor, 0))}"
-
-    return texto_formatado[:tamanho].ljust(tamanho)
+    return format_ansi_field(texto, tamanho)
 
 
 def Script_adiciona_barra(Script, numero, operacao, estado, tipo, GBT,
@@ -216,6 +267,11 @@ def Script_Inclui_DLIN(Script,
                        vet_unidades_operacao):
 
     n_eqp = len(vet_Barra_De)
+    bruto = {nome: _valores_brutos(vet, n_eqp) for nome, vet in (
+        ("R", vet_resistencia), ("X", vet_reatancia), ("S", vet_suceptancia),
+        ("Tap", vet_tap), ("Tmin", vet_tap_min), ("Tmax", vet_tap_max),
+        ("Def", vet_defasagem), ("Cn", vet_Capacidade_Normal),
+        ("Ce", vet_Capacidade_Emergencia), ("Ceq", vet_Capacidade_Equipamento))}
 
     vet_tipo = formatar_argumentos(vet_tipo, n_eqp, 1)
     vet_Barra_De = formatar_argumentos(vet_Barra_De, n_eqp, 5)
@@ -256,31 +312,23 @@ def Script_Inclui_DLIN(Script,
         estado = str(vet_estado[k]).rjust(1)
         proprietario = str(vet_proprietario[k]).rjust(1)
         modo_controle = str(vet_modo_controle[k]).rjust(1)
-        resistencia = str(vet_resistencia[k]).rjust(10)
-        reatancia = str(vet_reatancia[k]).rjust(10)
-        suceptancia = str(vet_suceptancia[k]).rjust(10)
-        tap = str(vet_tap[k]).rjust(10)
-        tap_min = str(vet_tap_min[k]).rjust(10)
-        tap_max = str(vet_tap_max[k]).rjust(10)
-        defasagem = str(vet_defasagem[k]).rjust(10)
         Barra_Controlada = str(vet_Barra_Controlada[k]).rjust(6)
-        Capacidade_Normal = str(vet_Capacidade_Normal[k]).rjust(10)
-        Capacidade_Emergencia = str(vet_Capacidade_Emergencia[k]).rjust(10)
         Numero_Taps = str(vet_Numero_Taps[k]).rjust(2)
-        Capacidade_Equipamento = str(vet_Capacidade_Equipamento[k]).rjust(10)
         Numero_unidades = str(vet_Numero_unidades[k]).rjust(3)
         unidades_operacao = str(vet_unidades_operacao[k]).rjust(3)
 
-        resistencia = formatar_digitos_pexplic(resistencia, 6)
-        reatancia = formatar_digitos_pexplic(reatancia, 8)
-        suceptancia = formatar_digitos_pexplic(suceptancia, 6)
-        tap = formatar_digitos_pexplic(tap, 5)
-        tap_min = formatar_digitos_pexplic(tap_min, 5)
-        tap_max = formatar_digitos_pexplic(tap_max, 5)
-        defasagem = formatar_digitos_pexplic(defasagem, 5)
-        Capacidade_Normal = formatar_digitos_pexplic(Capacidade_Normal, 4)
-        Capacidade_Emergencia = formatar_digitos_pexplic(Capacidade_Emergencia, 4)
-        Capacidade_Equipamento = formatar_digitos_pexplic(Capacidade_Equipamento, 4)
+        # The LT record has an 8-column X field; the transformer record keeps 6.
+        e_linha = tipo in ("L", "1")
+        resistencia = format_ansi_field(bruto["R"][k], DLIN_R_WIDTH)
+        reatancia = format_ansi_field(bruto["X"][k], DLIN_X_WIDTH if e_linha else 6)
+        suceptancia = format_ansi_field(bruto["S"][k], DLIN_S_WIDTH)
+        tap = format_ansi_field(bruto["Tap"][k], 5)
+        tap_min = format_ansi_field(bruto["Tmin"][k], 5)
+        tap_max = format_ansi_field(bruto["Tmax"][k], 5)
+        defasagem = format_ansi_field(bruto["Def"][k], 5)
+        Capacidade_Normal = format_ansi_field(bruto["Cn"][k], 4)
+        Capacidade_Emergencia = format_ansi_field(bruto["Ce"][k], 4)
+        Capacidade_Equipamento = format_ansi_field(bruto["Ceq"][k], 4)
 
         if (tipo == "L") or (tipo == "1"):
             Script_adiciona_LT(linhas, Barra_De, Abertura_De, operacao,
@@ -377,6 +425,9 @@ def Script_Inclui_DCER(Script,
                        vet_modo_correcao):
 
     n_cer = len(vet_barra)
+    bruto = {nome: _valores_brutos(vet, n_cer) for nome, vet in (
+        ("incl", vet_inclinacao), ("Qg", vet_geracao_Q),
+        ("Qn", vet_limite_Q_min), ("Qm", vet_limite_Q_max))}
 
     vet_barra = formatar_argumentos(vet_barra, n_cer, 5)
     vet_operacao = formatar_argumentos(vet_operacao, n_cer, 1)
@@ -400,10 +451,10 @@ def Script_Inclui_DCER(Script,
         grupo = str(vet_grupo[k]).rjust(2)[:2]
         unidades = str(vet_unidades[k]).rjust(2)[:2]
         barra_controlada = str(vet_barra_controlada[k]).rjust(5)[:5]
-        inclinacao = formatar_digitos_pexplic(str(vet_inclinacao[k])[:6], 6)
-        geracao_Q = formatar_digitos_pexplic(str(vet_geracao_Q[k])[:5], 5)
-        limite_Q_min = formatar_digitos_pexplic(str(vet_limite_Q_min[k])[:5], 5)
-        limite_Q_max = formatar_digitos_pexplic(str(vet_limite_Q_max[k])[:5], 5)
+        inclinacao = format_ansi_field(bruto["incl"][k], 6)
+        geracao_Q = format_ansi_field(bruto["Qg"][k], 5)
+        limite_Q_min = format_ansi_field(bruto["Qn"][k], 5)
+        limite_Q_max = format_ansi_field(bruto["Qm"][k], 5)
         modo_controle = str(vet_modo_controle[k]).rjust(1)[:1]
         estado = str(vet_estado[k]).rjust(1)[:1]
         modo_correcao = str(vet_modo_correcao[k]).rjust(1)[:1]

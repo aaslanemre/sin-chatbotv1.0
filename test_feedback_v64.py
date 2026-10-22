@@ -178,7 +178,7 @@ fresh_state()
 env = run_app()
 make, render_widget = env["_make_assistant_message"], env["_render_feedback_widget"]
 VERSION = env["APP_VERSION"]
-check("APP_VERSION constant is set (single source)", VERSION == "v6.5.0")
+check("APP_VERSION constant is set (single source)", VERSION == "v6.5.1")
 
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n═══ 2. submit leaves simulation state untouched ═══\n")

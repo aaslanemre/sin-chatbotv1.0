@@ -339,7 +339,7 @@ _pm = importlib.util.module_from_spec(_pspec)
 _pspec.loader.exec_module(_pm)
 PROMPT_HASH = hashlib.md5(_pm.SYSTEM_PROMPT.encode()).hexdigest()
 
-USER = {"id": "userA", "email": "a@t", "full_name": "A", "last_seen_version": "v6.5.0",
+USER = {"id": "userA", "email": "a@t", "full_name": "A", "last_seen_version": "v6.5.1",
         "ui_mode": "iniciante"}
 
 

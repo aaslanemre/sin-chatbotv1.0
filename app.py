@@ -6,6 +6,7 @@ import uuid
 import unicodedata
 import streamlit as st
 from agents.pwf_agent import generate_dbar_block, generate_statcom_block, generate_contingency_block
+from utils.anarede_lib import COUPLING_LINE_X_PCT
 from agents.results_analyzer import save_results_file, check_convergence, format_results_report
 from agents.network_builder import (
     convert_line_params,
@@ -592,9 +593,33 @@ _PDE_SCENARIO_NAMES = {
 }
 
 
+# v6.5.1: an action verb + an equipment word, as a request ("quero modelar uma
+# bess", "gostaria de inserir um statcom") or an imperative ("modelar bess").
+# Questions ("como modelar uma BESS no ANAREDE?") stay free questions.
+_INTENT_VERBS = (r"(?:simular|simule|modelar|modele|inserir|insira|adicionar|adicione|incluir|inclua|"
+                 r"colocar|coloque|conectar|conecte|instalar|instale|estudar|estude)")
+_INTENT_DESIRE = r"(?:quero|queria|preciso|precisaria|gostaria|vou|vamos|desejo|pretendo)"
+_INTENT_EQUIPMENT = r"(?:bess|baterias?|armazenamento|statcom)"
+_INTENT_REQUEST_RE = re.compile(
+    rf"(?<!\bnao )\b{_INTENT_DESIRE}\s+(?:de\s+)?{_INTENT_VERBS}\b.*\b{_INTENT_EQUIPMENT}\b")
+_INTENT_IMPERATIVE_RE = re.compile(
+    rf"^(?:(?:ola|oi|bom dia|boa tarde|boa noite|por favor)\W+)*{_INTENT_VERBS}\b.*\b{_INTENT_EQUIPMENT}\b")
+_QUESTION_WORDS_RE = re.compile(
+    r"^(?:como|o que|que|qual|quais|quando|onde|por que|porque|pra que|para que|quem|quanto|sera)\b")
+
+
+def _is_verb_equipment_intent(text: str) -> bool:
+    if _is_free_question(text):
+        return False
+    t = _normalize_str(text)
+    if _QUESTION_WORDS_RE.search(t):
+        return False
+    return bool(_INTENT_REQUEST_RE.search(t) or _INTENT_IMPERATIVE_RE.search(t))
+
+
 def _is_simulation_intent(text: str) -> bool:
     t = text.lower()
-    return any(trigger in t for trigger in _SIMULATION_INTENT_TRIGGERS)
+    return any(trigger in t for trigger in _SIMULATION_INTENT_TRIGGERS) or _is_verb_equipment_intent(text)
 
 
 _NETWORK_INTENT_TRIGGERS = [
@@ -2117,29 +2142,26 @@ def _bess_pwf_lines(data: dict) -> str:
     )
 
 
-# STEP7 mode question: the options stay visible, the explanations go to "Detalhes".
+# STEP7 mode question: each option once, with its explanation inline; the
+# coupling-line note goes to "Detalhes". The reactance shown is the value the
+# generator writes (COUPLING_LINE_X_PCT, in % — the DLIN R/X unit).
 _BESS_MODE_QUESTION = (
     "**Qual o modo de operação da BESS?**\n\n"
-    "1. **Controle de tensão (barra PV — tipo 1)**\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 0)**"
+    "1. **Controle de tensão (barra PV — tipo 1)** — recomendado para estudos "
+    "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
+    "2. **Despacho fixo (barra PQ — tipo 0)** — injeção fixa de potência ativa e reativa."
 )
 _BESS_MODE_RECOMMENDATION = (
-    "Para inserir a BESS nessa barra, recomenda-se criar uma nova barra "
-    "conectada à barra desejada por uma linha com reatância de **0.00001 pu** "
-    "(resistência e susceptância zeradas)."
+    "Para inserir a BESS nessa barra, o arquivo gerado cria uma nova barra "
+    "conectada à barra desejada por uma linha com reatância de "
+    f"**{_si.fmt_num(COUPLING_LINE_X_PCT)} %** (resistência e susceptância zeradas), "
+    "o menor valor diferente de zero que o ANAREDE aceita com 4 casas decimais."
 )
-_BESS_MODE_DETAILS = (
-    _BESS_MODE_RECOMMENDATION + "\n\n"
-    "1. **Controle de tensão (barra PV — tipo 1):** recomendado para estudos "
-    "do SIN, especialmente se o leilão exigir modo GFM.\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 0):** injeção fixa de potência ativa e reativa."
-)
+_BESS_MODE_DETAILS = _BESS_MODE_RECOMMENDATION
 _BESS_MODE_DETAILS_LONG = (
     _BESS_MODE_RECOMMENDATION + "\n\n"
-    "1. **Controle de tensão (barra PV — tipo 1):** recomendado para estudos "
-    "do SIN, especialmente se o leilão exigir modo GFM. A barra é configurada "
-    "com despacho fixo de potência ativa e tensão-alvo que a BESS tentará controlar.\n\n"
-    "2. **Despacho fixo (barra PQ — tipo 0):** injeção fixa de potência ativa e reativa."
+    "No modo PV, a barra é configurada com despacho fixo de potência ativa e "
+    "tensão-alvo que a BESS tentará controlar."
 )
 
 # STEP8 recommendation shown under the MVA question. The form keeps 0 ≤ P ≤ S.
@@ -2422,6 +2444,27 @@ def _is_contingency_exit(text: str) -> bool:
     return bool(_CONTINGENCY_EXIT_RE.search(text))
 
 
+def _start_simulation_flow(user_text: str) -> str:
+    """IDLE → STEP1 of the guided BESS/STATCOM flow; returns the deterministic intro."""
+    # Clear any paused state when starting fresh
+    if st.session_state.sim_status == "paused":
+        try:
+            clear_paused_state(st.session_state["session_id"])
+        except Exception:
+            pass
+    st.session_state.simulation_mode = True
+    st.session_state.sim_status = "active"
+    st.session_state.sim_step = "STEP1"
+    st.session_state.sim_data["sim_type"] = "STATCOM" if "statcom" in user_text.lower() else "BESS"
+    return _ux.with_details(
+        "Vou te guiar pelo processo de simulação passo a passo.\n\n"
+        + _download_links_text() + "\n\n"
+        "---\n\n"
+        + _STEP1_DB_QUESTION,
+        _STEP1_DB_RECOMMENDATION
+    )
+
+
 def _handle_sim_state(user_text: str) -> str | None:
     """
     Drive the simulation state machine.
@@ -2519,23 +2562,7 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Ao final, gero o arquivo `.pwf` completo pronto para o ANAREDE."
             )
         if _is_simulation_intent(user_text):
-            # Clear any paused state when starting fresh
-            if st.session_state.sim_status == "paused":
-                try:
-                    clear_paused_state(st.session_state["session_id"])
-                except Exception:
-                    pass
-            st.session_state.simulation_mode = True
-            st.session_state.sim_status = "active"
-            st.session_state.sim_step = "STEP1"
-            data["sim_type"] = "STATCOM" if "statcom" in user_text.lower() else "BESS"
-            return _ux.with_details(
-                "Vou te guiar pelo processo de simulação passo a passo.\n\n"
-                + _download_links_text() + "\n\n"
-                "---\n\n"
-                + _STEP1_DB_QUESTION,
-                _STEP1_DB_RECOMMENDATION
-            )
+            return _start_simulation_flow(user_text)
         if _is_lt_data_message(user_text):
             pending_lt = _parse_lt_params(user_text)
             data["pending_lt"] = pending_lt
@@ -4234,6 +4261,9 @@ def _answer_with_llm(question, study_context, sim_context_note):
     Retrieve once, show the grounding badge (and red disclosure), stream the answer,
     then replace the streamed text with the final stored text so that what is shown
     is exactly what is stored. Returns (answer, sources, grounding_info).
+
+    answer is None when, with no simulation active, the LLM opened with the
+    guided-flow intro: the text is discarded and the caller starts the real flow.
     """
     chain = st.session_state.chain
     inputs = {"question": question, "study_context": study_context}
@@ -4250,6 +4280,8 @@ def _answer_with_llm(question, study_context, sim_context_note):
                 st.markdown(answer)
                 return answer, [], None
         raw = result["answer"]
+        if not _sim_in_progress() and _ux.is_guided_intro(raw):
+            return None, [], None
         retrieval_scores = result.get("retrieval_scores")
         docs = result.get("source_documents", [])
         ginfo = None
@@ -4307,6 +4339,10 @@ def _answer_with_llm(question, study_context, sim_context_note):
                           "Verifique se o Qdrant e o Ollama estão acessíveis.") + sim_context_note
                 body_slot.markdown(answer)
                 return answer, [], None
+        if not _sim_in_progress() and _ux.is_guided_intro(raw):
+            badge_slot.empty()
+            body_slot.empty()
+            return None, [], None
         try:
             chain.remember(question, raw)
         except Exception:
@@ -4468,10 +4504,17 @@ def _process_input(prompt: str, source: str = "typed"):
 
             answer, sources, _grounding_info = _answer_with_llm(
                 full_prompt, study_context, sim_context_note)
-            _reply = _make_assistant_message(
-                answer, sources=sources, user_message=prompt,
-                step_before=_step_before, type_before=_type_before,
-                grounding=_grounding_info)
+            if answer is None:
+                # The LLM imitated the guided-flow intro: start the real flow instead.
+                _reply = _make_assistant_message(
+                    _start_simulation_flow(prompt), sources=[], user_message=prompt,
+                    step_before=_step_before, type_before=_type_before, deterministic=True)
+                _render_body(_reply)
+            else:
+                _reply = _make_assistant_message(
+                    answer, sources=sources, user_message=prompt,
+                    step_before=_step_before, type_before=_type_before,
+                    grounding=_grounding_info)
 
         _render_feedback_widget(_reply)
 

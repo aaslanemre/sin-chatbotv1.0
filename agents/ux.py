@@ -102,6 +102,28 @@ def filter_guide_stream(chunks, keep_guide: bool):
         yield strip_guide_offer(buf) if has_guide_offer(buf) else buf
 
 
+# ── Guided-flow intro written by the LLM (v6.5.1) ─────────────────────────────
+
+# The deterministic intro is "Vou te guiar pelo processo de simulação…". When no
+# simulation is active the LLM must not imitate it ("Ótimo! Vou te guiar…"):
+# such an answer is discarded and the real guided flow starts instead.
+_GUIDED_INTRO_RE = re.compile(
+    r"^\W*(?:(?:otimo|perfeito|claro|excelente|certo|beleza|ok|muito bem|vamos la|entendi)\W+)*"
+    r"(?:entao\W+)?(?:eu\s+)?(?:vou\s+(?:te\s+|lhe\s+|o\s+|a\s+)?guia(?:r|-lo|-la)\b"
+    r"|vamos\s+(?:comecar|iniciar)\s+(?:a|o|sua|seu)\s+(?:simulacao|estudo|processo)\b)"
+)
+
+
+def _fold(text: str) -> str:
+    t = unicodedata.normalize("NFKD", str(text or "")).lower()
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def is_guided_intro(text) -> bool:
+    """True when an answer opens with the guided-flow intro wording."""
+    return bool(_GUIDED_INTRO_RE.search(_fold(text).lstrip()[:200]))
+
+
 # ── Sources ("Fontes consultadas") ────────────────────────────────────────────
 
 EXCERPT_CHARS = 200

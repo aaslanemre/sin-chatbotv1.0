@@ -171,9 +171,9 @@ check("stored/logged text is the full plain text (no separator), main first",
       and rows("SELECT message FROM chat_logs WHERE message_id=?", (m["message_id"],))[0]["message"] == m["content"])
 run("1001")
 m = last_assistant()
-check("mode question: both options visible, explanations in details",
+check("mode question: both options visible with inline explanations, coupling line in details",
       "1. **Controle de tensão (barra PV — tipo 1)**" in m["main"] and "2. **Despacho fixo" in m["main"]
-      and "GFM" in m["details"] and "0.00001 pu" in m["details"])
+      and "GFM" in m["main"] and "0.0001 %" in m["details"])  # v6.5.1
 check("state machine order unchanged (STEP6 → STEP7 → STEP7 mode)", ss["sim_step"] == "STEP7" and ss["sim_data"]["bess_bus"] == "1001")
 
 
@@ -356,8 +356,8 @@ check("DB failure: no exception, friendly toast, nothing marked as sent",
 section("8. 'Novidades da versão' banner once per version per user")
 # ═════════════════════════════════════════════════════════════════════════════
 notes = RELEASE_NOTES[APP_VERSION]
-check("APP_VERSION v6.5.0 with PT-BR draft notes (novidades + o que testar), marked DRAFT",
-      APP_VERSION == "v6.5.0" and notes["novidades"] and notes["o_que_testar"] and "DRAFT" in notes["status"])
+check("APP_VERSION v6.5.1 with PT-BR draft notes (novidades + o que testar), marked DRAFT",
+      APP_VERSION == "v6.5.1" and notes["novidades"] and notes["o_que_testar"] and "DRAFT" in notes["status"])
 pw = bcrypt.hashpw(b"segredo1", bcrypt.gensalt()).decode()
 H.lite.execute("INSERT INTO users (id, email, password_hash, full_name) VALUES ('userN','n@t',?,'N')", (pw,)); H.lite.commit()
 u = svc.login("n@t", "segredo1")
