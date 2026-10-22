@@ -228,11 +228,17 @@ def _log_message(msg: dict, step=None, sim_type=None):
         pass
 
 
-def _append_system_assistant_message(content):
-    """Assistant message produced outside the chat pipeline (sidebar buttons, resume)."""
+def _append_system_assistant_message(content, notice=False):
+    """Assistant message produced outside the chat pipeline (sidebar buttons, resume).
+
+    notice=True marks status messages (paused / resumed / ended / ✏️ prompt) that are
+    not step instructions, so they are never given to the LLM as the current step.
+    """
     step, stype = _sim_snapshot()
     msg = _make_assistant_message(content, step_before=step, type_before=stype,
                                   deterministic=True)
+    if notice:
+        msg["notice"] = True
     st.session_state.messages.append(msg)
     _log_message(msg)
     return msg
@@ -477,7 +483,8 @@ if "_pending_resume" in st.session_state:
     _append_system_assistant_message(
         f"Bem-vindo de volta! Encontrei uma simulação pausada ({_sim_type}, etapa {_step_label}).\n\n"
         "A simulação foi retomada automaticamente. Continue de onde parou, "
-        "ou digite **encerrar** para finalizar."
+        "ou digite **encerrar** para finalizar.",
+        notice=True,
     )
 
 
@@ -3675,7 +3682,8 @@ def _start_edit(field):
     data = st.session_state.sim_data
     _append_system_assistant_message(
         f"✏️ **Alterar {_EDIT_LABELS[field].lower()}** (atual: **{_param_value(field, data)}**)\n\n"
-        f"{_edit_question(field)}\n\nDigite **cancelar** para manter o valor atual."
+        f"{_edit_question(field)}\n\nDigite **cancelar** para manter o valor atual.",
+        notice=True,
     )
 
 
@@ -4108,7 +4116,8 @@ with st.sidebar:
                             pass
                         last_q = _current_step_question()
                         if last_q:
-                            _append_system_assistant_message(f"Simulação retomada.\n\n{last_q}")
+                            _append_system_assistant_message(f"Simulação retomada.\n\n{last_q}",
+                                                             notice=True)
                         st.rerun()
                 with col_end:
                     if st.button("⏹️ Encerrar", use_container_width=True):
@@ -4121,7 +4130,7 @@ with st.sidebar:
                             clear_paused_state(st.session_state["session_id"])
                         except Exception:
                             pass
-                        _append_system_assistant_message("Simulação encerrada.")
+                        _append_system_assistant_message("Simulação encerrada.", notice=True)
                         st.rerun()
             else:
                 if st.button("⏸️ Pausar simulação", use_container_width=True):
@@ -4139,7 +4148,8 @@ with st.sidebar:
                     _append_system_assistant_message(
                         "Simulação pausada. Você pode fazer perguntas livres.\n\n"
                         "Use o botão **▶️ Retomar** na barra lateral ou digite "
-                        "**retomar** para voltar à simulação."
+                        "**retomar** para voltar à simulação.",
+                        notice=True,
                     )
                     st.rerun()
     else:
@@ -4245,6 +4255,15 @@ def _guide_offer_allowed() -> bool:
     return _ux.guide_offer_allowed(previous, _sim_in_progress())
 
 
+def _step_not_covered_note() -> str:
+    """Low grounding mid-simulation: say briefly that the documents do not cover this step."""
+    step = st.session_state.get("sim_step", "IDLE")
+    if not step or step.startswith("IDLE"):
+        return ""
+    return (f"ℹ️ Os documentos consultados não cobrem diretamente o passo atual "
+            f"(**{_STEP_LABELS.get(step) or step}**).\n\n")
+
+
 def _write_stream(chunks) -> None:
     """st.write_stream when available, else a placeholder updated per chunk."""
     if hasattr(st, "write_stream"):
@@ -4289,7 +4308,7 @@ def _answer_with_llm(question, study_context, sim_context_note):
             ginfo = _grounding_for(retrieval_scores)
         answer = _ux.clean_llm_answer(raw, keep_guide) + sim_context_note
         if ginfo and ginfo["grounding_level"] == "red":
-            answer = f"{_grounding.DISCLOSURE}\n\n{answer}"
+            answer = f"{_grounding.DISCLOSURE}\n\n{_step_not_covered_note()}{answer}"
         if ginfo:
             _render_badge(ginfo["grounding_level"])
         st.markdown(answer)
@@ -4311,7 +4330,7 @@ def _answer_with_llm(question, study_context, sim_context_note):
         if ginfo:
             with badge_slot.container():
                 _render_badge(ginfo["grounding_level"])
-        disclosure = (f"{_grounding.DISCLOSURE}\n\n"
+        disclosure = (f"{_grounding.DISCLOSURE}\n\n" + _step_not_covered_note()
                       if ginfo and ginfo["grounding_level"] == "red" else "")
 
         raw_parts = []
@@ -4389,6 +4408,40 @@ _NUDGE_LABELS = {
 }
 
 
+def _current_step_messages() -> list:
+    """
+    Full text of the guide messages shown at the CURRENT step (oldest first), read
+    from the history on every call — never cached — so pause/resume and ✏️ always
+    reflect where the simulation is. Free LLM answers and status notices are
+    skipped; the scan stops at the first guide message of another step. When the
+    history no longer has them (e.g. resumed after logout), the step's
+    instructions are rebuilt from the simulation state.
+    """
+    step = st.session_state.get("sim_step", "IDLE")
+    found = []
+    for m in reversed(st.session_state.get("messages", [])):
+        if m.get("role") != "assistant" or not m.get("deterministic") or m.get("notice"):
+            continue
+        if m.get("sim_step_after") != step:
+            break
+        found.append(m["content"])
+    if found:
+        return found[::-1]
+    data = st.session_state.get("sim_data") or {}
+    if step == "STEP4" and data.get("scenario") and data.get("year"):
+        return [_sav_filename_hint(data.get("db", "ONS"), data["scenario"], data["year"])]
+    q = _current_step_question()
+    return [q] if q else []
+
+
+def _free_question_step_context() -> str:
+    """Step context for a free question asked while a simulation is active or paused."""
+    step = st.session_state.get("sim_step", "IDLE")
+    if not step or step.startswith("IDLE"):
+        return ""
+    return _ux.step_context(_STEP_LABELS.get(step) or step, _current_step_messages())
+
+
 def _process_input(prompt: str, source: str = "typed"):
     """
     One user turn: show + log the user message, run the state machine (or the LLM),
@@ -4433,6 +4486,7 @@ def _process_input(prompt: str, source: str = "typed"):
         _reply = _make_assistant_message(
             _resume_msg, user_message=prompt,
             step_before=_step_before, type_before=_type_before, deterministic=True)
+        _reply["notice"] = True
         with st.chat_message("assistant"):
             _render_body(_reply)
             _render_feedback_widget(_reply)
@@ -4483,6 +4537,9 @@ def _process_input(prompt: str, source: str = "typed"):
         else:
             # MODE 1: free technical Q&A via LLM
             study_context = st.session_state.study.summary()
+            _step_ctx = _free_question_step_context()   # rebuilt from the CURRENT step
+            if _step_ctx:
+                study_context = f"{study_context}\n\n{_step_ctx}"
             if _expert():
                 study_context = f"{study_context}\n\n{_EXPERT_NOTE}"
             full_prompt = prompt

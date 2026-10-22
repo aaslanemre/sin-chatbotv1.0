@@ -124,6 +124,35 @@ def is_guided_intro(text) -> bool:
     return bool(_GUIDED_INTRO_RE.search(_fold(text).lstrip()[:200]))
 
 
+# ── Free question asked mid-simulation (v6.5.1) ───────────────────────────────
+
+STEP_CONTEXT_INSTRUCTION = (
+    "The user is at this step; the question most likely refers to the instructions "
+    "in this message; answer about it and do not restart earlier steps. If the "
+    "reference documents do not cover this step, say so briefly instead of "
+    "answering about an earlier step's topic."
+)
+
+
+def step_context(step_label, step_messages) -> str:
+    """
+    Per-request LLM context for a free question asked during the guided flow:
+    the current step label and the full text of the guide message(s) shown at
+    this step (oldest first), followed by the instruction. '' if there is nothing.
+    """
+    msgs = [m.strip() for m in (step_messages or []) if m and m.strip()]
+    if not msgs:
+        return ""
+    parts = ["## GUIDED SIMULATION — CURRENT STEP", f"Current step: {step_label}"]
+    if len(msgs) == 1:
+        parts.append(f"Last guide message shown to the user:\n<<<\n{msgs[0]}\n>>>")
+    else:
+        parts.append(f"Guide message that opened this step:\n<<<\n{msgs[0]}\n>>>")
+        parts.append(f"Latest guide message shown to the user:\n<<<\n{msgs[-1]}\n>>>")
+    parts.append(STEP_CONTEXT_INSTRUCTION)
+    return "\n\n".join(parts)
+
+
 # ── Sources ("Fontes consultadas") ────────────────────────────────────────────
 
 EXCERPT_CHARS = 200
