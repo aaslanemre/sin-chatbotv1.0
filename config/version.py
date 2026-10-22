@@ -15,12 +15,16 @@ RELEASE_NOTES = {
             "Pedidos como “quero modelar uma BESS” ou “modelar bess” iniciam a simulação guiada.",
             "Perguntas livres no meio da simulação são respondidas sobre o passo atual "
             "(inclusive depois de pausar e retomar).",
+            "Sugestões clicáveis com valores usados com frequência (ex: base 100 MVA, "
+            "tensões do SIN, circuito 1): o clique só preenche o campo, que continua editável. "
+            "Ocultas no modo especialista.",
         ],
         "o_que_testar": [
             "Gere o .pwf de uma BESS e carregue no ANAREDE: o DLIN deve ser aceito sem erro.",
             "Monte uma rede do zero com a linha de 230 kV / 180 km e compare a tabela com o arquivo.",
             "Digite “quero modelar uma bess” e “como modelar uma BESS no ANAREDE?” e compare.",
             "No passo de carregar o SAV, pergunte “não acho essa opção, como encontrar?”.",
+            "Na rede do zero, use as sugestões (sugestão) e altere um valor antes de enviar.",
         ],
     },
     "v6.5.0": {

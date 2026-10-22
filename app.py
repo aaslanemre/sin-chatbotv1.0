@@ -4644,6 +4644,25 @@ def _on_form_submit(spec, base, sel_val):
     _queue_input(texts, "form")
 
 
+def _apply_chip(base, values):
+    """Chip callback: fill the form fields (before the form renders). Never submits
+    and never touches the simulation state; the user can still edit the value."""
+    for key, text in values.items():
+        st.session_state[f"fld_{base}_{key}"] = text
+
+
+def _render_chips(chips, base):
+    if not chips:
+        return
+    per_row = min(len(chips), 3)
+    for r in range(0, len(chips), per_row):
+        cols = st.columns(per_row)
+        for j, chip in enumerate(chips[r:r + per_row]):
+            with cols[j]:
+                st.button(chip["label"], key=f"chip_{base}_{r + j}", on_click=_apply_chip,
+                          args=(base, chip["values"]), help=chip["help"], use_container_width=True)
+
+
 def _render_form(spec, mid, ci):
     base = f"{mid}_{spec['id']}"
     sel_val = None
@@ -4658,6 +4677,8 @@ def _render_form(spec, mid, ci):
             sel_val = st.radio(sel["label"], values, index=values.index(sel["default"]),
                                format_func=lambda v: labels[v], horizontal=True, key=f"sel_{base}")
         sel_val = sel_val or sel["default"]
+    if not _expert():  # suggestion chips: outside the form, fill fields only
+        _render_chips(_si.suggestion_chips(spec, st.session_state.sim_data, sel_val), base)
     with st.form(key=f"form_{base}_{sel_val or ''}"):
         st.markdown(f"**{spec['title']}**")
         for f in _si.form_fields(spec, sel_val):

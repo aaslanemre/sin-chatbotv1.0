@@ -437,6 +437,79 @@ def _line_values_text(mode, vals):
     return f"R={n(vals['r'])} X={n(vals['x'])} Q={n(vals['q'])}"
 
 
+# ── suggestion chips (v6.5.1) ─────────────────────────────────────────────────
+# A chip fills one or more fields of the form with a value from
+# config/suggestions.py. It never submits: the user can edit the value first.
+
+def _bus_kv(data, number):
+    for b in (data.get("network") or {}).get("buses", []):
+        if b.get("number") == number:
+            return b.get("kv")
+    return None
+
+
+def _chip_groups(spec, data, sel, table):
+    """[(entries, target)]; target = field key, or {entry value key: field key}."""
+    fid = spec["id"]
+    if fid == "net_setup":
+        return [(table.get("net_base_mva"), "base")]
+    if fid == "net2_kv":
+        return [(table.get("net_bus_voltage_kv"), "v")]
+    if fid == "net2_v_pu":
+        tipo = ((data.get("net2") or {}).get("current") or {}).get("tipo")
+        return [(table.get("net_vref_pu" if tipo == 2 else "net_vset_pu"), "v")]
+    if fid == "net2_qmin":
+        return [(table.get("net_q_limits"), {"qmin": "v"})]
+    if fid == "net2_qmax":
+        return [(table.get("net_q_limits"), {"qmax": "v"})]
+    if fid == "net_bus":
+        groups = [(table.get("net_bus_voltage_kv"), "kv")]
+        if sel == "2":
+            groups.append((table.get("net_vref_pu"), "v_pu"))
+        if sel == "1":
+            groups += [(table.get("net_vset_pu"), "v_pu"),
+                       (table.get("net_q_limits"), {"qmin": "qmin", "qmax": "qmax"})]
+        return groups
+    if fid == "net3_circuit":
+        return [(table.get("net_line_circuit"), "v")]
+    if fid == "net_line_mode" or fid.startswith("net_line_values_"):
+        mode = sel if fid == "net_line_mode" else fid[-1]
+        if mode == "1":
+            kv = _bus_kv(data, ((data.get("net3") or {}).get("current") or {}).get("from_bus"))
+            by_kv = table.get("line_params_per_km_by_kv") or {}
+            entries = by_kv.get(int(kv)) if kv is not None and float(kv).is_integer() else None
+            return [(entries, {"r": "r", "x": "x", "b": "b", "l": "l"})]
+        if mode == "2":
+            return [(table.get("line_params_pu"), {"r": "r", "x": "x", "b": "b"})]
+        return [(table.get("line_params_pct"), {"r": "r", "x": "x", "q": "q"})]
+    if fid == "statcom_q":
+        return [(table.get("statcom_q_limits"), {"qmin": "qmin", "qmax": "qmax"})]
+    return []
+
+
+def suggestion_chips(spec, data=None, selector_value=None, table=None):
+    """
+    Chips for a form: [{"label", "values": {field key: text}, "help"}]. Empty when
+    the table has no entry for the form's fields (no chip without an entry).
+    """
+    if table is None:
+        from config.suggestions import SUGGESTIONS as table
+    data = data or {}
+    sel = selector_value or (spec.get("selector") or {}).get("default")
+    keys = {f["key"] for f in form_fields(spec, sel)}
+    chips = []
+    for entries, target in _chip_groups(spec, data, sel, table):
+        for e in entries or []:
+            pairs = ({target: e["value"]} if isinstance(target, str)
+                     else {fk: e["value"][vk] for vk, fk in target.items()})
+            if not set(pairs) <= keys:
+                continue
+            chips.append({"label": f"{e['label']} (sugestão)",
+                          "values": {k: fmt_num(v) for k, v in pairs.items()},
+                          "help": f"Fonte: {e['source']} · Status: {e['status']}"})
+    return chips
+
+
 # ── progress ("Passo N de M") ────────────────────────────────────────────────
 
 STEP_SEQUENCES = {
