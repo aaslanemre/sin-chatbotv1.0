@@ -23,7 +23,8 @@ from agents.session_analysis import FEEDBACK_CATEGORIES
 from agents import grounding as _grounding
 from agents import ux as _ux
 from agents import structured_input as _si
-from config.glossary import GLOSSARY, GLOSSARY_STATUS, find_terms as _glossary_terms
+from agents import anatem_flow as _at
+from config.glossary import ALL_TERMS as GLOSSARY, GLOSSARY_STATUS, find_terms as _glossary_terms
 try:
     from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
 except ImportError:  # settings needs python-dotenv; keep the app importable without it
@@ -136,6 +137,7 @@ if "messages" not in st.session_state:
                 "HVDC, cenários de operação, fluxo de potência e muito mais.\n\n"
                 "Se quiser realizar um estudo de simulação com o Anarede, é só me dizer "
                 "e eu te guio pelo processo completo.\n\n"
+                "Para estabilidade dinâmica, também te guio no ANATEM.\n\n"
                 "Como posso ajudá-lo hoje?"
             ),
         }
@@ -438,7 +440,9 @@ def _render_body(msg: dict):
     """Message text; 'Detalhes' expander for secondary text; .pwf download under each block."""
     main = msg.get("main", msg["content"])
     details = msg.get("details")
-    segs = _ux.split_pwf_segments(main, msg.get("sim_type")) if msg.get("deterministic") else []
+    # .pwf downloads only for ANAREDE flows (the ANATEM guide generates no files)
+    segs = (_ux.split_pwf_segments(main, msg.get("sim_type"))
+            if msg.get("deterministic") and msg.get("sim_type") != _at.SIM_TYPE else [])
     if segs:
         for i, seg in enumerate(segs):
             if seg[0] == "text":
@@ -1881,6 +1885,7 @@ def _net7_converged_prompt(data: dict) -> str:
         "- `inserir BESS` — adicionar bateria ao caso\n"
         "- `inserir STATCOM` — adicionar compensador reativo\n"
         "- `contingências` ou `n-1` — análise de contingências\n"
+        "- `anatem` — continuar o estudo no ANATEM (simulação dinâmica)\n"
         "- `encerrar` — finalizar",
         "**Como interpretar os resultados:**\n"
         "- Tensões de barra aparecem próximas a cada barra no diagrama (em pu ou kV)\n"
@@ -2400,6 +2405,10 @@ def _current_step_question() -> str:
     sim_type = data.get("sim_type", "BESS")
     device_label = "STATCOM" if sim_type == "STATCOM" else "BESS"
 
+    if step == _at.PROGRAM_CHOICE_STEP:
+        return _at.PROGRAM_CHOICE_QUESTION
+    if step in _at.ALL_STEPS:
+        return _at.question(step, data)
     if step == "IDLE_LT_CONFIRM":
         return (
             "Você quer que eu te guie pelo processo de inserção no ANAREDE?\n\n"
@@ -2531,10 +2540,14 @@ def _current_step_question() -> str:
             "Deseja continuar com outro cenário ou patamar de carga?\n\n"
             "- Responda com o **nome ou número do cenário** para ir direto\n"
             "- Informe um **novo ano** (2026–2040) para trocar o horizonte\n"
-            "- Digite **encerrar** para finalizar a sessão de simulação"
+            "- Digite **encerrar** para finalizar a sessão de simulação\n"
+            + _HANDOFF_LINE
         )
     return ""
 
+
+# v6.6.0: end of an ANAREDE study → ANATEM (button under the message + text "anatem")
+_HANDOFF_LINE = "- Digite **anatem** para continuar o estudo no ANATEM (simulação dinâmica)"
 
 _NEXT_STEPS_TEXT = (
     "**Próximos passos recomendados:**\n\n"
@@ -2545,6 +2558,8 @@ _NEXT_STEPS_TEXT = (
     "na região de estudo\n"
     "4. Após validar em regime permanente com ANAREDE, testar a solução "
     "no ANATEM para verificar o desempenho dinâmico\n\n"
+    "Para seguir para o ANATEM, clique em **🌀 Continuar para o ANATEM** "
+    "ou digite **anatem**.\n\n"
     "Deseja continuar com outro cenário ou patamar de carga?"
 )
 
@@ -2579,6 +2594,130 @@ def _start_simulation_flow(user_text: str) -> str:
         + _STEP1_DB_QUESTION,
         _STEP1_DB_RECOMMENDATION
     )
+
+
+# ── ANATEM guided flow, program choice and ANAREDE → ANATEM handoff (v6.6.0) ──
+
+def _close_simulation(notice=None):
+    """End the current simulation cleanly (same reset as 'encerrar'); optional logged notice."""
+    st.session_state.simulation_mode = False
+    st.session_state.sim_step = "IDLE"
+    st.session_state.sim_data = {}
+    st.session_state.sim_status = None
+    st.session_state.pop("_edit_pending", None)
+    try:
+        clear_paused_state(st.session_state["session_id"])
+    except Exception:
+        pass
+    if notice:
+        _append_system_assistant_message(notice, notice=True)
+
+
+def _start_anatem_flow(handoff=None) -> str:
+    """→ AT1 of the ANATEM guide; returns the intro (full the first time in a session)."""
+    if st.session_state.sim_status == "paused":
+        try:
+            clear_paused_state(st.session_state["session_id"])
+        except Exception:
+            pass
+    st.session_state.simulation_mode = True
+    st.session_state.sim_status = "active"
+    st.session_state.sim_step = "AT1"
+    st.session_state.sim_data = _at.initial_data(handoff)
+    full = not st.session_state.get("_anatem_intro_shown")
+    st.session_state["_anatem_intro_shown"] = True
+    return _at.start_message(st.session_state.sim_data, full)
+
+
+def _ask_program_choice(user_text: str) -> str:
+    """'ANAREDE ou ANATEM?' — idle state, no simulation started yet."""
+    st.session_state.sim_step = _at.PROGRAM_CHOICE_STEP
+    st.session_state.sim_data = {"pending_question": user_text}
+    return _at.PROGRAM_CHOICE_QUESTION
+
+
+def _handle_program_choice(user_text: str):
+    choice = _at.classify_program_choice(user_text)
+    pending = (st.session_state.sim_data or {}).get("pending_question") or ""
+    if choice == "ANAREDE":
+        st.session_state.sim_step = "IDLE"
+        st.session_state.sim_data = {}
+        return _start_simulation_flow(pending if "statcom" in pending.lower() else user_text)
+    if choice == "ANATEM":
+        return _start_anatem_flow()
+    if choice == "CANCEL":
+        st.session_state.sim_step = "IDLE"
+        st.session_state.sim_data = {}
+        return "Tudo bem, nenhuma simulação iniciada. Se tiver dúvidas sobre o SIN, é só perguntar."
+    return _at.PROGRAM_CHOICE_RETRY
+
+
+# Steps where an ANAREDE study is complete and can continue in the ANATEM.
+_HANDOFF_STEPS = ("STEP12", "NET7_RESULTS")
+
+
+def _anatem_handoff() -> str:
+    """Close the ANAREDE study (completed) and open the ANATEM guide with what it captured."""
+    data = st.session_state.sim_data
+    stype = data.get("sim_type") or "BESS"
+    if st.session_state.sim_step == "NET7_RESULTS" and data.get("net7_color") != "green":
+        return ("Para seguir para o ANATEM, o caso precisa estar **convergido** no ANAREDE.\n\n"
+                + _net7_not_converged(data))
+    devices = _bess_devices(data) if stype == "BESS" else []
+    handoff = _at.build_handoff(data, devices)
+    _close_simulation()
+    return (f"✅ Estudo no ANAREDE ({stype}) concluído e registrado.\n\n---\n\n"
+            + _start_anatem_flow(handoff))
+
+
+_ANATEM_CROSS_NOTICE = (
+    "Já existe uma simulação em andamento. Para trocar de programa, use os botões "
+    "**⚡ Iniciar simulação ANAREDE** / **🌀 Iniciar simulação ANATEM** na barra lateral "
+    "(a simulação atual é encerrada), ou digite **encerrar** primeiro."
+)
+
+
+def _handle_anatem_state(user_text: str) -> str:
+    """One message at an AT*/ATS* step (free questions were already routed to the LLM)."""
+    step = st.session_state.sim_step
+    if step not in _at.EVENT_STEPS:   # event descriptions are free text: no commands there
+        if _at.is_restart(user_text):
+            return "Reiniciando a simulação do zero!\n\n" + _start_anatem_flow()
+        # an ANAREDE *request* (answers that merely mention the ANAREDE go on to the step)
+        request = _is_simulation_intent(user_text) or _at.is_generic_sim_intent(user_text)
+        if request and (_at.names_anarede(user_text) or _at.mentions_anarede_equipment(user_text)):
+            return _ANATEM_CROSS_NOTICE
+    new_step, reply = _at.handle(step, st.session_state.sim_data, user_text)
+    if new_step == "IDLE":
+        _close_simulation()
+    else:
+        st.session_state.sim_step = new_step
+    return reply
+
+
+def _route_idle_program(user_text: str):
+    """
+    Program routing at IDLE, before the existing ANAREDE routing. Returns a reply, or
+    None to fall through to today's routing (network / BESS / STATCOM / LT data).
+      both programs named + a request        → "ANAREDE ou ANATEM?"
+      ANATEM/ANAT0 named + a request          → ANATEM
+      ANAREDE named + a dynamics phrase       → ANAREDE (ANAREDE wins)
+      dynamics phrase, no program named       → ANATEM ("…de um BESS": ask)
+    ANAREDE-only messages keep today's routing (a generic request naming ANAREDE
+    starts ANAREDE after the LT-data check, see the end of the IDLE branch).
+    """
+    at_named, ar_named = _at.names_anatem(user_text), _at.names_anarede(user_text)
+    at_intent = _at.is_anatem_intent(user_text)
+    request = at_intent or _at.is_generic_sim_intent(user_text) or _is_simulation_intent(user_text)
+    if at_named and ar_named:
+        return _ask_program_choice(user_text) if request else None
+    if ar_named:
+        return _start_simulation_flow(user_text) if at_intent else None
+    if at_intent:
+        if not at_named and _at.mentions_anarede_equipment(user_text):
+            return _ask_program_choice(user_text)
+        return _start_anatem_flow()
+    return None
 
 
 def _handle_sim_state(user_text: str) -> str | None:
@@ -2619,6 +2758,12 @@ def _handle_sim_state(user_text: str) -> str | None:
             and _is_free_question(user_text)):
         return None
 
+    # ── v6.6.0: program choice and ANATEM steps handle their own commands ─────
+    if step == _at.PROGRAM_CHOICE_STEP:
+        return _handle_program_choice(user_text)
+    if step in _at.ALL_STEPS:
+        return _handle_anatem_state(user_text)
+
     # ── Global: encerrar / restart checks (before any step logic) ─────────────
     t_lower = user_text.lower()
     _ENCERRAR = ["encerrar", "finalizar", "terminar", "fim", "sair", "encerra", "finaliza"]
@@ -2636,6 +2781,16 @@ def _handle_sim_state(user_text: str) -> str | None:
             "Sessão de simulação encerrada. Os resultados ficam registrados no histórico acima.\n\n"
             "Se precisar retomar ou tiver dúvidas sobre o SIN, é só perguntar."
         )
+
+    # ── v6.6.0: end of an ANAREDE study → ANATEM; never start ANATEM mid-flow ──
+    if step in _HANDOFF_STEPS and _at.names_anatem(user_text) and not _at.is_question(user_text):
+        return _anatem_handoff()
+    if step != "IDLE" and _at.names_anatem(user_text) and _at.is_anatem_intent(user_text):
+        if st.session_state.sim_status is None:   # idle confirmation (LT data): nothing to close
+            st.session_state.sim_step = "IDLE"
+            st.session_state.sim_data = {}
+            return _start_anatem_flow()
+        return _ANATEM_CROSS_NOTICE
 
     _RESTART = [
         "quero simular", "iniciar simulação", "nova simulação",
@@ -2655,6 +2810,9 @@ def _handle_sim_state(user_text: str) -> str | None:
 
     # ── IDLE: check for simulation intent ─────────────────────────────────────
     if step == "IDLE":
+        routed = _route_idle_program(user_text)
+        if routed is not None:
+            return routed
         if _is_network_intent(user_text):
             if st.session_state.sim_status == "paused":
                 try:
@@ -2692,6 +2850,10 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "1. **Sim** — iniciar simulação guiada\n\n"
                 "2. **Não** — só quero uma resposta técnica"
             )
+        if _at.is_generic_sim_intent(user_text):   # no program named → ask which one
+            if _at.names_anarede(user_text):
+                return _start_simulation_flow(user_text)
+            return _ask_program_choice(user_text)
         return None  # Let LLM answer
 
     # ── IDLE_LT_CONFIRM: user is confirming whether to start guided flow ───────
@@ -4038,6 +4200,8 @@ def _handle_edit(user_text):
 def _study_params(data):
     """[(field or None, label, value)] for the study panel; field None = read-only."""
     stype = data.get("sim_type")
+    if stype == _at.SIM_TYPE:   # read-only: no ✏️ for the ANATEM guide
+        return [(None, label, value) for label, value in _at.study_params(data)]
     if stype == "NETWORK":
         net = data.get("network") or {}
         return [("net_title", "Título", net.get("title", "—")),
@@ -4136,7 +4300,8 @@ def _new_conversation():
     st.session_state.sim_data = {}
     st.session_state.sim_status = None
     st.session_state.study = StudyState()
-    for k in ("_links_shown", "_edit_pending", "_input_queue", "_lt_confirm_question"):
+    for k in ("_links_shown", "_edit_pending", "_input_queue", "_lt_confirm_question",
+              "_anatem_intro_shown", "_start_confirm"):
         st.session_state.pop(k, None)
     st.session_state.chain = None
     st.session_state.chain_error = None
@@ -4222,7 +4387,66 @@ _STEP_LABELS = {
     "STEP11":  "STEP 11: Resultados",
     "STEP11B": "STEP 11B: Contingências N-1",
     "STEP12":  "STEP 12: Próximos passos",
+    _at.PROGRAM_CHOICE_STEP: "Escolha: ANAREDE ou ANATEM",
+    **_at.STEP_LABELS,
 }
+
+
+# ── Sidebar: start ANAREDE / ANATEM (v6.6.0) ──────────────────────────────────
+# A click queues the canonical start text (logged with input_source='button'),
+# which the router turns into the flow. With a simulation active or paused, the
+# first click only asks for confirmation; confirming closes the old simulation
+# (logged notice, paused state cleared) and then starts the new one.
+
+def _on_start_click(program):
+    if st.session_state.get("sim_status") in ("active", "paused"):
+        st.session_state["_start_confirm"] = program
+        return
+    st.session_state.pop("_start_confirm", None)
+    if st.session_state.get("sim_step", "IDLE") != "IDLE":   # pending idle question (LT / program)
+        st.session_state.sim_step = "IDLE"
+        st.session_state.sim_data = {}
+    _queue_input([_at.START_TEXT[program]], "button")
+
+
+def _on_start_confirm():
+    program = st.session_state.pop("_start_confirm", None)
+    if not program:
+        return
+    _close_simulation("Simulação encerrada.")
+    _queue_input([_at.START_TEXT[program]], "button")
+
+
+def _on_start_cancel():
+    st.session_state.pop("_start_confirm", None)
+
+
+_START_BUTTONS_CSS = (
+    "<style>"
+    ".st-key-start_anarede button{background:#1565C0;color:#fff;border-color:#1565C0;}"
+    ".st-key-start_anatem button{background:#6A1B9A;color:#fff;border-color:#6A1B9A;}"
+    "</style>"
+)
+
+
+def _render_start_buttons():
+    st.markdown(_START_BUTTONS_CSS, unsafe_allow_html=True)
+    st.button("**⚡ Iniciar simulação ANAREDE**", key="start_anarede", type="primary",
+              use_container_width=True, on_click=_on_start_click, args=("ANAREDE",))
+    st.button("**🌀 Iniciar simulação ANATEM**", key="start_anatem", type="primary",
+              use_container_width=True, on_click=_on_start_click, args=("ANATEM",))
+    pending = st.session_state.get("_start_confirm")
+    if pending and st.session_state.get("sim_status") in ("active", "paused"):
+        st.warning("Já existe uma simulação em andamento. Encerrar e iniciar uma nova?")
+        c_yes, c_no = st.columns(2)
+        with c_yes:
+            st.button("Sim, iniciar nova", key="start_confirm_yes", use_container_width=True,
+                      on_click=_on_start_confirm)
+        with c_no:
+            st.button("Cancelar", key="start_confirm_no", use_container_width=True,
+                      on_click=_on_start_cancel)
+    elif pending:
+        st.session_state.pop("_start_confirm", None)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -4235,6 +4459,8 @@ with st.sidebar:
     st.divider()
 
     _step_labels = _STEP_LABELS
+
+    _render_start_buttons()
 
     if st.session_state.sim_status in ("active", "paused"):
         # ── "Estudo atual": progress, collected parameters (✏️), pause/resume ──
@@ -4331,6 +4557,8 @@ with st.sidebar:
         st.session_state.study = StudyState()
         st.session_state.pop("_links_shown", None)  # links message is gone with the history
         st.session_state.pop("_edit_pending", None)
+        st.session_state.pop("_anatem_intro_shown", None)
+        st.session_state.pop("_start_confirm", None)
         st.session_state.chain = None
         st.session_state.chain_error = None
         clear_study()
@@ -4560,6 +4788,7 @@ _NUDGE_LABELS = {
     "STEP10": "resultado do fluxo",
     "STEP11": "análise de resultados",
     "STEP11B": "contingências N-1",
+    **_at.NUDGE_LABELS,
 }
 
 
@@ -4718,8 +4947,10 @@ def _process_input(prompt: str, source: str = "typed"):
                 full_prompt, study_context, sim_context_note)
             if answer is None:
                 # The LLM imitated the guided-flow intro: start the real flow instead.
+                _flow = (_start_anatem_flow() if _at.names_anatem(prompt) and not _at.names_anarede(prompt)
+                         else _start_simulation_flow(prompt))
                 _reply = _make_assistant_message(
-                    _start_simulation_flow(prompt), sources=[], user_message=prompt,
+                    _flow, sources=[], user_message=prompt,
                     step_before=_step_before, type_before=_type_before, deterministic=True)
                 _render_body(_reply)
             else:
@@ -4850,6 +5081,14 @@ def _render_form(spec, mid, ci):
                               args=(spec, base, sel_val), use_container_width=True)
 
 
+def _handoff_offered() -> bool:
+    if st.session_state.get("sim_status") != "active" or st.session_state.get("_edit_pending"):
+        return False
+    step = st.session_state.get("sim_step")
+    data = st.session_state.get("sim_data") or {}
+    return step == "STEP12" or (step == "NET7_RESULTS" and data.get("net7_color") == "green")
+
+
 def _render_controls(msg):
     """Buttons/forms for the current step (or ✏️ edit) + inline glossary (iniciante)."""
     mid = msg.get("message_id") or "x"
@@ -4861,6 +5100,9 @@ def _render_controls(msg):
                     _render_option_buttons(spec, mid, ci)
                 else:
                     _render_form(spec, mid, ci)
+    if _handoff_offered():   # v6.6.0: next to the end-of-study options, not one of the step answers
+        st.button("🌀 Continuar para o ANATEM", key=f"handoff_{mid}", on_click=_queue_input,
+                  args=([_at.HANDOFF_TEXT], "button"), use_container_width=True)
     if not _expert():
         terms = _glossary_terms(msg.get("content", ""))
         if terms:

@@ -19,6 +19,8 @@ Control specs:
 
 import re
 
+from agents import anatem_flow as AT
+
 # Substrings the state machine treats as commands anywhere in a message (global
 # encerrar / restart checks, NET "ajuda" detection, line-definition guard). A
 # free-text form value containing one would trigger the command instead of being
@@ -172,6 +174,8 @@ def controls_for(step, data, parpel_scenarios=(), pde_scenarios=()):
     """List of control specs for the current step (empty → typing only)."""
     data = data or {}
     sim_type = data.get("sim_type", "BESS")
+    if step == AT.PROGRAM_CHOICE_STEP or step in AT.ALL_STEPS:
+        return anatem_controls(step, data)
     if step == "IDLE_LT_CONFIRM":
         return [_buttons(_opt("Sim, iniciar simulação guiada", "Sim"),
                          _opt("Não, só quero uma resposta técnica", "Não"))]
@@ -281,6 +285,89 @@ def controls_for(step, data, parpel_scenarios=(), pde_scenarios=()):
     return []
 
 
+# ── ANATEM guided flow (v6.6.0) ───────────────────────────────────────────────
+
+F_AT_SAV = _f("sav", "Arquivo .sav", "text", placeholder="ex: caso_estudo.sav")
+F_AT_CASE = _f("case", "Número do caso", "int", 1, 99999, placeholder="ex: 5")
+F_AT_DMAQ = _f("dmaq", "Arquivo DMAQ gerado pelo ANAT0", "text", placeholder="ex: dmaq_anat0.dma")
+F_AT_CDU = _f("cdu", "Número do CDU", "int", 1, 999999, placeholder="ex: 1042")
+F_AT_BUSES = _f("buses", "Barras de geração", "text", placeholder="ex: 10, 20")
+
+
+def anatem_controls(step, data):
+    data = data or {}
+    if step == AT.PROGRAM_CHOICE_STEP:
+        return [_buttons(_opt("⚡ ANAREDE — fluxo de potência (regime permanente)", AT.T_PROGRAM_ANAREDE),
+                         _opt("🌀 ANATEM — estabilidade eletromecânica (dinâmica)", AT.T_PROGRAM_ANATEM))]
+    if step == "AT1":
+        return [_buttons(_opt("1 — SIN (base ONS)", AT.T_ONS), _opt("2 — SIN (base EPE)", AT.T_EPE),
+                         _opt("3 — Caso pequeno / rede própria", AT.T_SMALL))]
+    if step == "AT2":
+        form = _form("at_case", "Caso base convergido", [F_AT_SAV, F_AT_CASE])
+        if data.get("at2_confirm"):
+            return [_buttons(_opt("✅ Confirmar", AT.T_CONFIRM)), form]
+        return [form]
+    if step in ("AT3",):
+        return [_buttons(_opt("✅ Rodou sem erros", AT.T_RAN_OK), _opt("❌ Deu erro", AT.T_RAN_ERR))]
+    if step == "AT4":
+        return [_form("at_dmaq", "Arquivo DMAQ", [F_AT_DMAQ])]
+    if step == "AT5":
+        return [_buttons(_opt(AT.T_CONFIGURED))]
+    if step == "AT6":
+        if data.get("equip") == "pendente":
+            return [_buttons(_opt(AT.T_MODELS_DONE))]
+        return [_buttons(_opt(AT.T_YES), _opt(AT.T_ALREADY))]
+    if step == "AT7":
+        return [_buttons(_opt(AT.T_READY))]
+    if step == "AT8":
+        return [_buttons(_opt("✅ Rodou sem erros", AT.T_RAN_OK), _opt("❌ " + AT.T_RUN_CDU_ERR, AT.T_RUN_CDU_ERR))]
+    if step == "AT9":
+        cdu = data.get("cdu") or {}
+        if not cdu.get("number"):
+            return [_form("at_cdu", "CDU com erro", [F_AT_CDU])]
+        if not cdu.get("where"):
+            return [_buttons(_opt(AT.T_IN_DMAQ), _opt(AT.T_NOT_DMAQ))]
+        return [_buttons(_opt(AT.T_GOV), _opt(AT.T_AVR))]
+    if step in ("AT10", "ATS4"):
+        if data.get("osc_pending"):
+            return [_buttons(_opt(AT.T_SMALL_OSC), _opt(AT.T_LARGE_OSC))]
+        if step == "AT10":
+            return [_buttons(_opt(AT.T_FLAT), _opt(AT.T_VARYING))]
+        return [_buttons(_opt(AT.T_FLAT_LINE), _opt(AT.T_VARYING), _opt(AT.T_ERROR))]
+    if step in AT.EVENT_STEPS:
+        if data.get("events"):
+            return [_buttons(_opt(AT.T_ADD_EVENT), _opt(AT.T_END))]
+        return [_buttons(_opt(AT.T_END))]
+    if step == "ATS2":
+        return [_form("ats_case", "Caso pequeno", [F_AT_SAV, F_AT_CASE, F_AT_BUSES])]
+    if step == "ATS3":
+        return [_buttons(_opt(AT.T_CONFIRM_MODELS), _opt(AT.T_NO_MODELS))]
+    return []
+
+
+def _compose_anatem(fid, vals):
+    """(errors, texts) for the ANATEM forms; None when `fid` is not one of them."""
+    if fid in ("at_case", "ats_case"):
+        sav = vals["sav"]
+        if not re.fullmatch(r"[^\s,;:'\"`()]+\.sav", sav, re.I):
+            return ["Arquivo .sav: informe o nome do arquivo com a extensão .sav, sem espaços."], []
+        txt = f"{sav}, caso {vals['case']}"
+        if fid == "ats_case":
+            buses = re.findall(r"\d+", vals["buses"])
+            if not buses or re.sub(r"[\d\s,;]|\be\b", "", vals["buses"]) or any(
+                    not 1 <= int(b) <= 99999 for b in buses):
+                return ["Barras de geração: números de 1 a 99999 separados por vírgula."], []
+            txt += ", barras " + ", ".join(str(int(b)) for b in buses)
+        return [], [txt]
+    if fid == "at_dmaq":
+        if re.search(r"\s", vals["dmaq"]):
+            return ["Arquivo DMAQ: informe só o nome do arquivo, sem espaços."], []
+        return [], [vals["dmaq"]]
+    if fid == "at_cdu":
+        return [], [f"CDU {vals['cdu']}"]
+    return None
+
+
 def controls_for_edit(field, data, parpel_scenarios=(), pde_scenarios=()):
     """Controls for re-asking ONE parameter from the study panel."""
     data = data or {}
@@ -336,6 +423,9 @@ def compose(spec, raw_values, selector_value=None, data=None):
     if errors:
         return errors, []
     n = fmt_num
+    anatem = _compose_anatem(fid, vals)
+    if anatem is not None:
+        return anatem
 
     if fid == "years":
         years = re.findall(r"\b(20\d\d)\b", vals["years"])
@@ -522,11 +612,15 @@ STEP_SEQUENCES = {
                 "STATCOM_STEP_CBUS", "STEP9", "STEP10", "STEP11", "STEP11B", "STEP12"],
     "NETWORK": ["NET1_SETUP", "NET2_BUSES", "NET3_LINES", "NET4_REVIEW",
                 "NET5_GENERATE", "NET6_RUN", "NET7_RESULTS"],
+    "ANATEM": AT.MAIN_STEPS,
+    "ANATEM_PEQUENO": AT.SMALL_STEPS,   # option 3 at AT1 (no ANAT0)
 }
 
 
 def progress(sim_type, step):
     """(n, m) for 'Passo n de m', or (None, None) when the step is outside the sequence."""
+    if sim_type == AT.SIM_TYPE and str(step).startswith("ATS"):
+        sim_type = "ANATEM_PEQUENO"
     seq = STEP_SEQUENCES.get(sim_type or "BESS")
     if not seq or step not in seq:
         return None, None

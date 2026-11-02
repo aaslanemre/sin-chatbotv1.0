@@ -19,12 +19,14 @@ from agents.session_analysis import (
     grounding_caption,
     grounding_vs_rating,
     match_feedback_to_messages,
+    step_label,
     summarize_session,
     timeline_text,
 )
 from agents.grounding import BADGE_LABELS
 
 
+SIM_TYPE_FILTER = ["Todos", "BESS", "STATCOM", "NETWORK", "ANATEM", "Conversa livre"]
 SECTIONS = ["Visão Geral", "Usuários", "Sessões", "Feedback", "Documentos", "Exportar"]
 INPUT_SOURCE_LABELS = {"typed": "digitado", "button": "botão", "form": "formulário"}
 STATUS_LABELS = {"novo": "🆕 novo", "em_analise": "🔎 em análise",
@@ -137,7 +139,8 @@ def _render_transcript(sess, messages, feedback, update_fn):
     for entry, fbs in zip(messages, matched):
         who = (entry.get("full_name") or sess.get("full_name") or "Usuario") \
             if entry["role"] == "user" else "Assistente"
-        _bubble(entry["role"], who, entry.get("sim_step"), entry["message"])
+        _bubble(entry["role"], who, step_label(entry.get("sim_step")) if entry.get("sim_step") else None,
+                entry["message"])
         if len(entry["message"] or "") > BUBBLE_CHARS:
             # chat_logs keeps the full text; the bubble shows the first characters only
             with st.expander("Ver mensagem completa (formatada)"):
@@ -234,7 +237,7 @@ def render_admin_panel():
         st.subheader("Tipo de sessao")
         breakdown = get_session_type_breakdown()
         bc1, bc2 = st.columns(2)
-        bc1.metric("Simulacao (BESS/STATCOM)", breakdown["simulation"])
+        bc1.metric("Simulacao (ANAREDE/ANATEM)", breakdown["simulation"])
         bc2.metric("Conversa livre", breakdown["free"])
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -338,7 +341,7 @@ def render_admin_panel():
             user_opts.update({u["email"]: u["id"] for u in all_users})
             sel_user = st.selectbox("Usuario", list(user_opts.keys()), key="sess_user")
         with col_type:
-            sim_type_opt = st.selectbox("Tipo", ["Todos", "BESS", "STATCOM", "NETWORK", "Conversa livre"], key="sess_type")
+            sim_type_opt = st.selectbox("Tipo", SIM_TYPE_FILTER, key="sess_type")
         with col_flag:
             flagged_only = st.checkbox("Apenas marcadas", key="sess_flagged")
 
@@ -373,7 +376,7 @@ def render_admin_panel():
                 agg = aggregate_by_step(summaries, all_fb)
                 if agg:
                     df_agg = pd.DataFrame(agg)
-                    df_agg["Passo"] = df_agg["sim_type"] + " " + df_agg["sim_step"]
+                    df_agg["Passo"] = df_agg["sim_type"] + " " + df_agg["sim_step"].map(step_label)
                     df_agg = df_agg.rename(columns={
                         "down": "👎", "sessions_not_advancing": "Sessões sem avançar",
                         "help_back": "Ajuda/voltar", "abandoned": "Abandonos",
@@ -468,7 +471,7 @@ def render_admin_panel():
         f_status = fa.selectbox("Status", ["Todos"] + FEEDBACK_STATUSES, key="fb_f_status")
         f_cat = fb_.selectbox("Categoria", ["Todas"] + _CATEGORY_KEYS,
                               format_func=lambda k: k if k == "Todas" else _cat_label(k), key="fb_f_cat")
-        f_type = fc.selectbox("Tipo", ["Todos", "BESS", "STATCOM", "NETWORK", "Conversa livre"], key="fb_f_type")
+        f_type = fc.selectbox("Tipo", SIM_TYPE_FILTER, key="fb_f_type")
         f_rating = fd.selectbox("Avaliação", ["Todas", "up", "down"],
                                 format_func=lambda k: {"up": "👍", "down": "👎"}.get(k, k), key="fb_f_rating")
         fe, ff, fg, fh = st.columns(4)
@@ -670,7 +673,7 @@ def render_admin_panel():
             user_opts_exp.update({u["email"]: u["id"] for u in all_users_exp})
             sel_user_exp = st.selectbox("Usuario", list(user_opts_exp.keys()), key="exp_user")
         with col_type:
-            sim_type_exp = st.selectbox("Tipo", ["Todos", "BESS", "STATCOM", "NETWORK", "Conversa livre"], key="exp_type")
+            sim_type_exp = st.selectbox("Tipo", SIM_TYPE_FILTER, key="exp_type")
 
         start_dt = datetime.combine(e_start, datetime.min.time())
         end_dt = datetime.combine(e_end, datetime.min.time())

@@ -42,8 +42,42 @@ GLOSSARY = {
           "1,0 pu de tensão é a tensão nominal da barra.",
 }
 
+# v6.6.0 — terms of the ANATEM guide, kept apart from the ANAREDE terms above.
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+GLOSSARY_ANATEM = {
+    "ANATEM": "Programa do CEPEL para simulação no tempo da estabilidade eletromecânica "
+              "(dinâmica) do sistema, a partir de um caso de fluxo de potência do ANAREDE.",
+    "ANAT0": "Rotina acessada no ANAREDE (Análise > ANAT0) que prepara o caso para o ANATEM: "
+             "distribui a geração de cada barra entre as máquinas da base dinâmica e gera um "
+             "DMAQ com o número de unidades ajustado ao ponto de operação.",
+    "STB": "Arquivo de entrada do ANATEM (.stb) que reúne os comandos da simulação: leitura do "
+           "caso (.sav), arquivos de modelos, DMAQ, eventos (DEVT) e variáveis plotadas (DPLT).",
+    "DMAQ": "Código do ANATEM com os dados das máquinas síncronas de cada barra: grupo, número "
+            "de unidades e os modelos (CDUs) de seus controles.",
+    "CDU": "Controlador Definido pelo Usuário: modelo de controle (regulador de tensão, de "
+           "velocidade, PSS, conversores…) descrito em blocos e usado pelo ANATEM.",
+    "DEVT": "Código do ANATEM para os eventos da simulação (ex: curto-circuito, abertura de "
+            "linha, degrau).",
+    "DPLT": "Código do ANATEM que define as variáveis gravadas para plotagem.",
+    "DFNT": "Código do ANATEM que associa modelos (por exemplo, de usinas eólicas e "
+            "fotovoltaicas) a barras do sistema.",
+    "flat run": "Simulação sem perturbações usada para verificar a inicialização: com o caso "
+                "bem inicializado, as variáveis ficam constantes.",
+    "PLOTCEPEL": "Programa do CEPEL para visualizar os gráficos das variáveis gravadas pelo ANATEM.",
+    "AVR": "Regulador automático de tensão da máquina síncrona: controla a tensão terminal "
+           "atuando na excitação.",
+    "GOV": "Regulador de velocidade da máquina (governador): controla a potência mecânica e, "
+           "portanto, a potência ativa.",
+    "PSS": "Estabilizador de sistema de potência: sinal adicional no regulador de tensão para "
+           "amortecer oscilações eletromecânicas.",
+}
+
+# Everything the app shows (📖 Glossário, inline help) and matches in messages.
+ALL_TERMS = {**GLOSSARY, **GLOSSARY_ANATEM}
+
 # Case-sensitive acronyms; the rest match case-insensitively.
-_CI_TERMS = {"Referência", "hachura"}
+# "STB" also matches the file extension (.stb).
+_CI_TERMS = {"Referência", "hachura", "flat run", "STB"}
 
 
 def _pattern(term):
@@ -51,7 +85,7 @@ def _pattern(term):
     return re.compile(r"(?<![\w-])" + re.escape(term) + r"(?![\w-])", flags)
 
 
-_PATTERNS = {t: _pattern(t) for t in GLOSSARY}
+_PATTERNS = {t: _pattern(t) for t in ALL_TERMS}
 
 
 def find_terms(text):

@@ -17,7 +17,19 @@ import unicodedata
 
 NOT_ADVANCING_THRESHOLD = 3
 
-TERMINAL_STEPS = {"STEP12", "NET7_RESULTS"}
+# v6.6.0: AT11 / ATS5 (ANATEM events) are the last step of the ANATEM guide.
+TERMINAL_STEPS = {"STEP12", "NET7_RESULTS", "AT11", "ATS5"}
+
+# v6.6.0 ANATEM guide (sim_type "ANATEM"), in flow order. Main path, then the
+# small-case path (option 3 at AT1). No step is exempt from the not-advancing rule.
+ANATEM_STEP_ORDER = ("AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT10",
+                     "AT11", "ATS2", "ATS3", "ATS4", "ATS5")
+ANATEM_STEP_SHORT = {
+    "AT1": "base", "AT2": "caso", "AT3": "ANAT0", "AT4": "DMAQ", "AT5": ".stb",
+    "AT6": "equipamentos", "AT7": "verificação", "AT8": "execução", "AT9": "CDU",
+    "AT10": "PLOTCEPEL", "AT11": "eventos", "ATS2": ".stb/DMAQ", "ATS3": "equipamentos",
+    "ATS4": "flat run", "ATS5": "eventos",
+}
 
 # Steps where a user legitimately sends many messages without the step changing
 # (bus-by-bus / line-by-line data entry), so the "N turns without advancing"
@@ -71,6 +83,8 @@ def infer_sim_type(step, carried=None, default=None):
         return "STATCOM"
     if step and step.startswith("IDLE_LT"):
         return "LT"
+    if step in ANATEM_STEP_ORDER:
+        return "ANATEM"
     return carried or default or "N/D"
 
 
@@ -249,7 +263,7 @@ def timeline_text(analysis, threshold=NOT_ADVANCING_THRESHOLD) -> str:
     """e.g. 'STEP1 → STEP3 → STEP7 ×4 ⚠️ → ⛔ abandonada'"""
     parts = []
     for _stype, step, turns in analysis["steps"]:
-        label = step
+        label = step_label(step)
         if turns > 1:
             label += f" ×{turns}"
         if step in analysis["not_advancing"]:
@@ -408,7 +422,15 @@ def grounding_vs_rating(feedback) -> list:
     return out
 
 
+def step_label(step) -> str:
+    """'AT3 (ANAT0)' for ANATEM steps; other steps unchanged."""
+    short = ANATEM_STEP_SHORT.get(step)
+    return f"{step} ({short})" if short else step
+
+
 def _step_sort_key(step):
+    if step in ANATEM_STEP_ORDER:
+        return ("AT", ANATEM_STEP_ORDER.index(step), "")
     m = re.match(r"([A-Z_]*?)(\d+)([A-Z]*)$", step or "")
     return (m.group(1), int(m.group(2)), m.group(3)) if m else (step or "", 0, "")
 

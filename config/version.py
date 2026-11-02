@@ -1,9 +1,29 @@
 # Single source of truth for the app version (user sidebar, admin sidebar, feedback rows).
-APP_VERSION = "v6.5.1"
+APP_VERSION = "v6.6.0"
 
 # "Novidades da versão" banner shown once per version per user (users.last_seen_version).
 # PT-BR, user-facing. Entries marked DRAFT must be reviewed before deploy.
 RELEASE_NOTES = {
+    "v6.6.0": {
+        "status": "DRAFT — review before deploy",
+        "novidades": [
+            "Novo fluxo guiado para o ANATEM (estabilidade eletromecânica): ANAT0, DMAQ, .stb, "
+            "simulação sem eventos, erros de CDU, verificação no PLOTCEPEL e eventos (DEVT). "
+            "O guia indica o que fazer; ele não gera arquivos do ANATEM.",
+            "Dois botões na barra lateral: “⚡ Iniciar simulação ANAREDE” e “🌀 Iniciar simulação "
+            "ANATEM”. Com uma simulação em andamento, o app pede confirmação antes de encerrá-la.",
+            "Quando você pede uma simulação sem dizer o programa, o app pergunta: ANAREDE ou ANATEM?",
+            "Ao final de um estudo no ANAREDE (BESS, STATCOM ou rede própria), o botão "
+            "“🌀 Continuar para o ANATEM” leva o estudo para o ANATEM, mantendo a base escolhida.",
+        ],
+        "o_que_testar": [
+            "Fluxo ANATEM com a base ONS, do começo ao fim.",
+            "Caminho do caso pequeno / rede própria (opção 3, sem ANAT0).",
+            "Erro de CDU: o ramo do regulador de velocidade (GOV) e o do regulador de tensão (AVR).",
+            "Handoff: termine um estudo de BESS e clique em “🌀 Continuar para o ANATEM”.",
+            "Os botões da barra lateral com uma simulação ativa (e com uma pausada).",
+        ],
+    },
     "v6.5.1": {
         "status": "DRAFT — review before deploy",
         "novidades": [
