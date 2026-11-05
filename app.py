@@ -3880,6 +3880,7 @@ _EDIT_LABELS = {
     "bess_mva": "Potência nominal", "bess_p_mw": "Potência ativa",
     "bess_bus_number": "Nova barra da BESS", "statcom_q": "Limites reativos",
     "net_title": "Título do caso",
+    "at_equipment": "Equipamentos",
 }
 
 _DEVICE_KEYS = ("bess_bus", "bess_bus_number", "bess_mva", "bess_p_mw", "bess_mode",
@@ -3935,6 +3936,8 @@ def _param_value(field, data):
         return f"{_si.fmt_num(data.get('statcom_q_min', 0))} a {_si.fmt_num(data.get('statcom_q_max', 0))} Mvar"
     if field == "net_title":
         return (data.get("network") or {}).get("title", "—")
+    if field == "at_equipment":
+        return _at.equipment_text(data) or "—"
     return str(data.get(field, "—"))
 
 
@@ -3963,6 +3966,8 @@ def _edit_question(field):
         return "Informe Qmin e Qmax em Mvar (ex: `Qmin -100 Mvar, Qmax 100 Mvar`)."
     if field == "net_title":
         return "Qual o novo título do caso?"
+    if field == "at_equipment":
+        return _at.EQUIPMENT_EDIT_QUESTION
     return ""
 
 
@@ -4089,6 +4094,14 @@ def _handle_edit(user_text):
         return True, (f"{extra}Não identifiquei {label.lower()}. {_edit_question(field)}\n\n"
                       "Ou digite **cancelar** para manter o valor atual.")
 
+    if field == "at_equipment":   # v6.6.1: ANATEM equipment (conventional / new equipment)
+        msg = _at.apply_equipment_edit(data, user_text)
+        if msg is None:
+            return retry()
+        st.session_state.pop("_edit_pending", None)
+        q = _current_step_question()
+        return True, f"✏️ {msg}" + (f"\n\n{q}" if q else "")
+
     if field == "db":
         if t == "3" or any(w in t for w in ["rede", "zero", "própria", "propria", "montar"]):
             return retry("Trocar para uma rede própria muda o tipo de simulação — "
@@ -4200,8 +4213,10 @@ def _handle_edit(user_text):
 def _study_params(data):
     """[(field or None, label, value)] for the study panel; field None = read-only."""
     stype = data.get("sim_type")
-    if stype == _at.SIM_TYPE:   # read-only: no ✏️ for the ANATEM guide
-        return [(None, label, value) for label, value in _at.study_params(data)]
+    if stype == _at.SIM_TYPE:   # read-only, except the equipment choice (v6.6.1)
+        eq_field = "at_equipment" if _at.equipment_editable(st.session_state.sim_step, data) else None
+        return [(eq_field if label == "Equipamentos" else None, label, value)
+                for label, value in _at.study_params(data)]
     if stype == "NETWORK":
         net = data.get("network") or {}
         return [("net_title", "Título", net.get("title", "—")),
@@ -5016,6 +5031,7 @@ def _render_option_buttons(spec, mid, ci):
             with cols[j]:
                 st.button(opt["label"], key=f"opt_{mid}_{ci}_{r + j}", on_click=_queue_input,
                           args=([opt["text"]], "button"), help=_term_help(opt.get("term")),
+                          type="primary" if opt.get("default") else "secondary",
                           use_container_width=True)
 
 

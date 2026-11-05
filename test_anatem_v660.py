@@ -127,6 +127,7 @@ def main_flow_buttons():
     click(AT.T_RAN_OK); seen.append(step())
     submit("at_dmaq", {"dmaq": "dmaq_anat0.dma"}); seen.append(step())
     click(AT.T_CONFIGURED); seen.append(step())
+    click(AT.T_INCLUDE_EQUIP); seen.append(step())              # v6.6.1: equipment branch first
     click(AT.T_YES); seen.append(step())
     click(AT.T_MODELS_DONE); seen.append(step())
     click(AT.T_READY); seen.append(step())
@@ -136,9 +137,11 @@ def main_flow_buttons():
     click(AT.T_GOV); seen.append(step())
     click(AT.T_RAN_OK); seen.append(step())
     click(AT.T_FLAT); seen.append(step())
-    run("curto-circuito trifásico na barra 1001 em t = 1 s"); seen.append(step())
+    click("Curto-circuito"); seen.append(step())                # v6.6.1: event menu
+    run("trifásico na barra 1001 em t = 1 s"); seen.append(step())
     click(AT.T_ADD_EVENT)
-    run("abertura da LT 1001-1002 no fim da linha"); seen.append(step())
+    click("Perda de linha de transmissão"); seen.append(step())
+    run("LT 1001-1002 aberta no fim da linha"); seen.append(step())
     final_data = copy.deepcopy(data())
     srcs.append(last_user_row()["input_source"])
     click(AT.T_END); seen.append(step())
@@ -147,19 +150,20 @@ def main_flow_buttons():
 
 ch, seen, srcs, fd = main_flow_buttons()
 check("sidebar button starts the ANATEM flow at AT1 (logged as button)", seen[0] == "AT1" and srcs[0] == "button")
-check("buttons/forms walk AT1→AT2→AT3→AT4→AT5→AT6(Sim, models)→AT7→AT8→AT9→AT8→AT10→AT11",
-      seen == ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT6", "AT7", "AT8", "AT9", "AT9", "AT9", "AT8",
-               "AT10", "AT11", "AT11", "AT11", "IDLE"], seen)
+check("buttons/forms walk AT1→AT2→AT3→AT4→AT5→AT6(Incluir, Sim, models)→AT7→AT8→AT9→AT8→AT10→AT11",
+      seen == ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT6", "AT6", "AT7", "AT8", "AT9", "AT9", "AT9", "AT8",
+               "AT10", "AT11", "AT11", "AT11", "AT11", "AT11", "IDLE"], seen)
 check("form answers logged with input_source='form'", srcs[1] == "form" and srcs[2] == "typed", srcs)
 check("captured data: base, .sav, case, DMAQ, equipment, events",
       fd.get("base") == "ONS" and fd.get("sav_name") == "caso_estudo.sav" and fd.get("case_number") == "5"
       and fd.get("dmaq_name") == "dmaq_anat0.dma" and fd.get("equip") == "incluidos"
-      and fd.get("events") == ["curto-circuito trifásico na barra 1001 em t = 1 s",
-                               "abertura da LT 1001-1002 no fim da linha"], fd)
+      and fd.get("equipment") == "include"
+      and fd.get("events") == [{"type": "Curto-circuito", "note": "trifásico na barra 1001 em t = 1 s"},
+                               {"type": "Perda de linha de transmissão", "note": "LT 1001-1002 aberta no fim da linha"}], fd)
 summary = reply()
 check("closing message: simulation recorded + study summary + continuation options",
       "Simulação registrada" in summary and "caso_estudo.sav" in summary and "dmaq_anat0.dma" in summary
-      and "SIN — base ONS" in summary and "abertura da LT" in summary and "Iniciar simulação ANATEM" in summary
+      and "SIN — base ONS" in summary and "Perda de linha de transmissão" in summary and "Iniciar simulação ANATEM" in summary
       and "perguntas livres" in summary, summary)
 check("after closing: IDLE, no simulation active", sim_state()["sim_status"] is None and step() == "IDLE")
 check("the LLM never ran during the guided flow", not llm_called(ch))
@@ -177,7 +181,7 @@ def main_flow_typed():
     for t in ["quero passar meu caso para o anatem", "1", "caso_estudo.sav, caso 5", "rodou sem erros",
               "dmaq_anat0.dma", "configurado", "já incluídos", "pronto", "deu erro no CDU",
               "CDU 1042", "está no DMAQ", "regulador de tensão (AVR)", "sem erros", "constante",
-              "degrau de carga de 5% na barra 1001", "encerrar"]:
+              "curto-circuito na barra 1001", "evento inserido", "encerrar"]:
         run(t)
         seen.append(step())
     return ch, seen
@@ -186,7 +190,7 @@ def main_flow_typed():
 ch2, seen2 = main_flow_typed()
 check("typed answers reach the same steps as the buttons",
       seen2 == ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT9", "AT9", "AT8",
-                "AT10", "AT11", "AT11", "IDLE"], seen2)
+                "AT10", "AT11", "AT11", "AT11", "IDLE"], seen2)
 check("typed flow: LLM never ran", not llm_called(ch2))
 
 
@@ -204,7 +208,7 @@ click(AT.T_SMALL)
 s1 = step()
 run("rede.sav, caso 1, barras 10, 20")
 s2, ats2_reply = step(), reply()
-click(AT.T_CONFIRM_MODELS); s3 = step()
+click(AT.T_INCLUDE_EQUIP); click(AT.T_CONFIRM_MODELS); s3 = step()
 click(AT.T_ERROR); s4 = step()
 run("1042"); run(AT.T_NOT_DMAQ); s5 = step()
 click(AT.T_VARYING); click(AT.T_SMALL_OSC); s6 = step()
@@ -654,7 +658,8 @@ ch = chain()
 at_state("AT11", AT5D, ch=ch); run("Como insiro um curto no DEVT?")
 check("free question at AT11 → LLM (not stored as an event)", llm_called(ch) and not data().get("events"))
 run("evento no fim da linha 1001")
-check("event text containing 'fim' is an event, not 'encerrar'", step() == "AT11" and data()["events"] == ["evento no fim da linha 1001"])
+check("event text containing 'fim' is an event, not 'encerrar'",
+      step() == "AT11" and data().get("event_pending") == "Perda de linha de transmissão")
 at_state("AT6", AT5D); run("encerrar")
 check("'encerrar' mid-flow ends the ANATEM simulation", step() == "IDLE" and "encerrada" in reply())
 at_state("AT2", {"base": "ONS"}); run("fim.sav, caso 2")
@@ -697,12 +702,13 @@ check("admin: sim_type filter (sessions, feedback, export) includes ANATEM",
       '"ANATEM"' in panel_src and panel_src.count("SIM_TYPE_FILTER, key=") == 3)
 check("DB: sessions.sim_type stores 'ANATEM' and the filter finds it (no schema change)",
       any(s["sim_type"] == "ANATEM" for s in svc.list_sessions(sim_type="ANATEM")))
-check("glossary: the 13 ANATEM terms, pending expert review",
+check("glossary: the 13 ANATEM terms + v6.6.1 DARQ/ULOG and DEVT event codes, pending expert review",
       set(GLOSSARY_ANATEM) == {"ANAT0", "ANATEM", "STB", "DMAQ", "CDU", "DEVT", "DPLT", "DFNT", "flat run",
-                               "PLOTCEPEL", "AVR", "GOV", "PSS"} and set(GLOSSARY_ANATEM) <= set(ALL_TERMS))
+                               "PLOTCEPEL", "AVR", "GOV", "PSS", "DARQ", "ULOG", "APCB", "APCC", "APCL",
+                               "ABCI", "RMGR", "MDLP", "MDLQ"} and set(GLOSSARY_ANATEM) <= set(ALL_TERMS))
 check("glossary matching: ANAT0, DMAQ and '.stb' found in a step message",
       {"ANAT0", "DMAQ", "STB"} <= set(find_terms(AT.question("AT3", {}) + " " + AT.question("AT5", {}))))
-check("APP_VERSION v6.6.0 with DRAFT PT-BR notes", APP_VERSION == "v6.6.0"
+check("APP_VERSION v6.6.1, v6.6.0 DRAFT PT-BR notes kept", APP_VERSION == "v6.6.1"
       and "DRAFT" in RELEASE_NOTES["v6.6.0"]["status"] and len(RELEASE_NOTES["v6.6.0"]["o_que_testar"]) == 5)
 start()
 check("welcome message mentions the ANATEM, the rest kept",

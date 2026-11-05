@@ -289,9 +289,18 @@ def controls_for(step, data, parpel_scenarios=(), pde_scenarios=()):
 
 F_AT_SAV = _f("sav", "Arquivo .sav", "text", placeholder="ex: caso_estudo.sav")
 F_AT_CASE = _f("case", "Número do caso", "int", 1, 99999, placeholder="ex: 5")
-F_AT_DMAQ = _f("dmaq", "Arquivo DMAQ gerado pelo ANAT0", "text", placeholder="ex: dmaq_anat0.dma")
+F_AT_DMAQ = _f("dmaq", "Arquivo DMAQ gerado pelo ANAT0", "text", placeholder="ex: dmaq_anat0")
 F_AT_CDU = _f("cdu", "Número do CDU", "int", 1, 999999, placeholder="ex: 1042")
 F_AT_BUSES = _f("buses", "Barras de geração", "text", placeholder="ex: 10, 20")
+
+
+def _equipment_buttons(data):
+    """v6.6.1 (P2): conventional study or new equipment; with a BESS/STATCOM bus carried
+    from the ANAREDE study, 'Incluir' is the default (highlighted) button."""
+    include = _opt(AT.T_INCLUDE_EQUIP_LABEL, AT.T_INCLUDE_EQUIP)
+    if AT.handoff_has_equipment_bus(data):
+        include = dict(include, label=f"{AT.T_INCLUDE_EQUIP_LABEL} (sugerido)", default=True)
+    return _buttons(_opt(AT.T_CONVENTIONAL), include)
 
 
 def anatem_controls(step, data):
@@ -316,7 +325,9 @@ def anatem_controls(step, data):
     if step == "AT6":
         if data.get("equip") == "pendente":
             return [_buttons(_opt(AT.T_MODELS_DONE))]
-        return [_buttons(_opt(AT.T_YES), _opt(AT.T_ALREADY))]
+        if data.get("equipment") == "include":
+            return [_buttons(_opt(AT.T_YES), _opt(AT.T_ALREADY))]
+        return [_equipment_buttons(data)]
     if step == "AT7":
         return [_buttons(_opt(AT.T_READY))]
     if step == "AT8":
@@ -335,13 +346,22 @@ def anatem_controls(step, data):
             return [_buttons(_opt(AT.T_FLAT), _opt(AT.T_VARYING))]
         return [_buttons(_opt(AT.T_FLAT_LINE), _opt(AT.T_VARYING), _opt(AT.T_ERROR))]
     if step in AT.EVENT_STEPS:
-        if data.get("events"):
+        if data.get("event_pending"):
+            return [_buttons(_opt(AT.T_EVENT_DONE))]
+        if data.get("events") and not data.get("event_menu"):
             return [_buttons(_opt(AT.T_ADD_EVENT), _opt(AT.T_END))]
-        return [_buttons(_opt(AT.T_END))]
+        return [_buttons(*[_opt(f"{i} — {label}", label) for i, label in enumerate(AT.EVENT_LABELS, 1)],
+                         _opt(AT.T_END))]
     if step == "ATS2":
+        if AT.ats2_files_question(data):
+            return [_buttons(_opt(AT.T_HAS_FILES), _opt(AT.T_NO_FILES))]
+        if data.get("ats2_files") == "guide":
+            return [_buttons(_opt(AT.T_FILES_CONTINUE))]
         return [_form("ats_case", "Caso pequeno", [F_AT_SAV, F_AT_CASE, F_AT_BUSES])]
     if step == "ATS3":
-        return [_buttons(_opt(AT.T_CONFIRM_MODELS), _opt(AT.T_NO_MODELS))]
+        if data.get("equipment") == "include":
+            return [_buttons(_opt(AT.T_CONFIRM_MODELS), _opt(AT.T_NO_MODELS))]
+        return [_equipment_buttons(data)]
     return []
 
 
@@ -393,6 +413,8 @@ def controls_for_edit(field, data, parpel_scenarios=(), pde_scenarios=()):
         return [_form("statcom_q", "Nova capacidade reativa", [F_QMIN, F_QMAX])]
     if field == "net_title":
         return [_form("edit_title", "Novo título", [F_TITLE_REQ])]
+    if field == "at_equipment":   # v6.6.1: ANATEM equipment (both values)
+        return [_equipment_buttons(data)]
     return []
 
 

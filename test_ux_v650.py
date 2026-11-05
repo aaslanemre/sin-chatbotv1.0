@@ -356,8 +356,8 @@ check("DB failure: no exception, friendly toast, nothing marked as sent",
 section("8. 'Novidades da versão' banner once per version per user")
 # ═════════════════════════════════════════════════════════════════════════════
 notes = RELEASE_NOTES[APP_VERSION]
-check("APP_VERSION v6.6.0 with PT-BR draft notes (novidades + o que testar), marked DRAFT",
-      APP_VERSION == "v6.6.0" and notes["novidades"] and notes["o_que_testar"] and "DRAFT" in notes["status"])
+check("APP_VERSION v6.6.1 with PT-BR draft notes (novidades + o que testar), marked DRAFT",
+      APP_VERSION == "v6.6.1" and notes["novidades"] and notes["o_que_testar"] and "DRAFT" in notes["status"])
 pw = bcrypt.hashpw(b"segredo1", bcrypt.gensalt()).decode()
 H.lite.execute("INSERT INTO users (id, email, password_hash, full_name) VALUES ('userN','n@t',?,'N')", (pw,)); H.lite.commit()
 u = svc.login("n@t", "segredo1")

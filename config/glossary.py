@@ -70,6 +70,27 @@ GLOSSARY_ANATEM = {
            "portanto, a potência ativa.",
     "PSS": "Estabilizador de sistema de potência: sinal adicional no regulador de tensão para "
            "amortecer oscilações eletromecânicas.",
+    # v6.6.1 — .stb codes as in the revised Word file (separate entries).
+    # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+    "DARQ": "Declara o nome e o caminho dos arquivos externos utilizados na simulação dinâmica "
+            "(arquivo .SAV de fluxo, arquivo de máquinas .DMA/.DAT, arquivos de controladores .CDU).",
+    "ULOG": "Define a atribuição explícita de unidades lógicas computacionais de leitura/gravação.",
+    # v6.6.1 — DEVT event cards shown in the event menu (names only, no syntax).
+    # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel) — codes from tester feedback, not validated.
+    "APCB": "Código de evento do bloco DEVT usado para curto-circuito (aplicação de defeito), junto "
+            "com APCC e APCL. Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "APCC": "Código de evento do bloco DEVT usado para curto-circuito (aplicação de defeito), junto "
+            "com APCB e APCL. Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "APCL": "Código de evento do bloco DEVT usado para curto-circuito (aplicação de defeito), junto "
+            "com APCB e APCC. Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "ABCI": "Código de evento do bloco DEVT para perda de linha de transmissão (abertura "
+            "permanente ou com religamento). Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "RMGR": "Código de evento do bloco DEVT para desligamento de unidade geradora (rejeição de um "
+            "bloco de geração síncrona). Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "MDLP": "Código de evento do bloco DEVT usado na rejeição de carga (desconexão de demanda), "
+            "junto com MDLQ. Sintaxe e colunas: conferir na documentação do ANATEM.",
+    "MDLQ": "Código de evento do bloco DEVT usado na rejeição de carga (desconexão de demanda), "
+            "junto com MDLP. Sintaxe e colunas: conferir na documentação do ANATEM.",
 }
 
 # Everything the app shows (📖 Glossário, inline help) and matches in messages.

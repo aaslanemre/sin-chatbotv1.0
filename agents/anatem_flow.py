@@ -11,6 +11,11 @@ Main flow (SIN base, ONS or EPE):
 Small case / own network (option 3 at AT1, no ANAT0):
   AT1 → ATS2 → ATS3 → ATS4 (→ AT9 → ATS4) → ATS5 → end
 
+v6.6.1 (revised Word guide + expert feedback P1–P5): ATS2 first asks whether the
+user has a .SAV and a .STB (example-case guidance when not); AT6/ATS3 first ask
+"conventional study or new equipment?"; AT5 uses the DARQ-only wording; AT8/ATS4
+name the menu and F5; AT11/ATS5 offer a menu of event types (names only).
+
 handle(step, data, text) -> (new_step, reply). new_step "IDLE" means the
 simulation ends (the app resets its state). `data` (sim_data) is mutated in place
 and only holds JSON-serialisable values (persisted on pause like the other flows).
@@ -102,6 +107,14 @@ T_ADD_EVENT, T_END = "Adicionar outro evento", "Encerrar"
 T_CONFIRM_MODELS, T_NO_MODELS = "Confirmar inclusão dos modelos", "Sem equipamentos"
 T_FLAT_LINE, T_ERROR = "Flat (linha reta)", "Erro"
 T_PROGRAM_ANAREDE, T_PROGRAM_ANATEM = "ANAREDE", "ANATEM"
+# v6.6.1
+T_HAS_FILES, T_NO_FILES = "Sim, já tenho", "Não tenho / quero um caso de exemplo"
+T_FILES_CONTINUE = "Já tenho o .SAV e o .STB, continuar"
+T_CONVENTIONAL = "Estudo convencional"
+# The button reads "Incluir BESS/STATCOM/HVDC"; the text it sends must not start with
+# "incluir … BESS", which app.py's ANAREDE-intent guard reads as a new ANAREDE request.
+T_INCLUDE_EQUIP_LABEL, T_INCLUDE_EQUIP = "Incluir BESS/STATCOM/HVDC", "Com equipamentos: BESS/STATCOM/HVDC"
+T_EVENT_DONE = "Evento inserido"
 START_TEXT = {"ANAREDE": "Iniciar simulação ANAREDE", "ANATEM": "Iniciar simulação ANATEM"}
 HANDOFF_TEXT = "Continuar para o ANATEM"
 
@@ -382,32 +395,84 @@ _AT3_ERROR = (
 )
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1: neutral example. OPEN: the Word file uses "dmaq_anat0.dma" here and ".DMA/.DAT"
+# in the DARQ definition, the feedback talks about "DMAQ.DAT" — extension not settled.
 _AT4_ASK = ("**Passo 4 — DMAQ ajustado.** Qual o nome do arquivo salvo pelo ANAT0? "
-            "(ex: `dmaq_anat0.dma`)")
+            "(ex: `dmaq_anat0`, com a extensão que você escolheu)")
 _AT4_DETAILS = ("Esse arquivo contém o bloco **DMAQ** com o número de unidades de cada máquina "
                 "síncrona ajustado ao ponto de operação.")
 
 
+def _known(value) -> str:
+    return f" (**{value}**)" if value else ""
+
+
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1 (P3): wording of the revised Word file; only DARQ in the instructions.
 def _at5_main(data) -> str:
-    sav = data.get("sav_name") or "o seu .sav"
-    case = data.get("case_number") or "o mesmo do ANAT0"
-    dmaq = data.get("dmaq_name") or "o arquivo gerado pelo ANAT0"
     return (
         "**Passo 5 — Edição do .stb.** Abra o arquivo **.stb** da base em um editor de texto "
         "e faça três ajustes:\n"
-        f"1. No bloco **ULOG/DARQ**, troque o nome do .sav por **{sav}**.\n"
-        f"2. Confira se o número do caso na linha de leitura do fluxo de potência é **{case}** "
-        "(o mesmo usado no ANAT0).\n"
-        f"3. No bloco **ULOG**, troque o arquivo DMAQ original por **{dmaq}** (gerado pelo ANAT0).\n\n"
+        "1. **Substituir o arquivo .SAV:** No cartão **DARQ**, localize a declaração de arquivo "
+        "associada à rede de fluxo de potência e atualize para o nome do seu arquivo .SAV "
+        f"convergido{_known(data.get('sav_name'))}.\n"
+        "2. **Conferir o número do caso:** Na linha de leitura do .SAV, confirme se o número do "
+        "caso especificado corresponde exatamente ao número do caso convergido no ANAREDE e "
+        f"processado no ANAT0{_known(data.get('case_number'))}.\n"
+        "3. **Substituir o arquivo DMAQ:** No cartão **DARQ**, substitua a referência do arquivo "
+        "DMAQ original pelo caminho do novo arquivo gerado pelo ANAT0"
+        f"{_known(data.get('dmaq_name'))}.\n\n"
         f"Responda **{T_CONFIGURED}** quando terminar."
     )
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-def _at6_main(data) -> str:
+# v6.6.1 (P3): the main .stb codes as SEPARATE entries (revised Word file). ULOG appears
+# only here and in the glossary, never in an instruction nor in a sentence with the other code.
+STB_CODES = (
+    "**Principais códigos do .stb:**\n"
+    "- **ULOG:** Define a atribuição explícita de unidades lógicas computacionais de "
+    "leitura/gravação.\n"
+    "- **DARQ:** Declara o nome e o caminho dos arquivos externos utilizados na simulação "
+    "dinâmica (arquivo .SAV de fluxo, arquivo de máquinas .DMA/.DAT, arquivos de "
+    "controladores .CDU).\n\n"
+    # expert feedback, split in two sentences so the two codes never share one
+    "O cartão ULOG ainda existe em rotinas automatizadas e bases históricas. A atribuição de "
+    "nomes de arquivos, porém, deve ser feita, idealmente, no bloco DARQ."
+)
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1 (P2): the equipment step is optional.
+_EQUIP_BRANCH_Q = (
+    "Seu estudo é puramente eletromecânico convencional (apenas máquinas síncronas e "
+    "reguladores básicos) ou você pretende acoplar novos equipamentos de eletrônica de "
+    "potência/armazenamento (BESS, STATCOM, elo VSC-HVDC)?"
+)
+
+
+def handoff_has_equipment_bus(data) -> bool:
+    """The ANAREDE study carried a BESS/STATCOM bus → 'Incluir' is the default answer."""
+    h = (data or {}).get("handoff") or {}
+    return bool(h.get("equipment_type") and h.get("equipment_bus"))
+
+
+def _equip_branch(head, data) -> str:
+    text = f"{head} {_EQUIP_BRANCH_Q}"
     line = _handoff_equipment_line(data)
-    return ("**Passo 6 — Equipamentos.** Deseja incluir os modelos do **BESS, STATCOM ou HVDC**?"
+    if line:
+        text += f"\n\n{line}"
+    if handoff_has_equipment_bus(data):
+        text += f" Sugestão: **{T_INCLUDE_EQUIP_LABEL}** (responda **sim** para manter)."
+    return text
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def _at6_main(data) -> str:
+    """After 'Incluir': the v6.6.0 question (Sim / Já incluídos no .stb)."""
+    line = _handoff_equipment_line(data)
+    return ("**Passo 6 — Equipamentos.** Deseja incluir agora os modelos do **BESS, STATCOM ou "
+            f"HVDC** no .stb? Responda **{T_YES}** para ver como, ou **{T_ALREADY}**."
             + (f"\n\n{line}" if line else ""))
 
 
@@ -434,11 +499,17 @@ _AT7_DETAILS = ("Essa simulação sem perturbação (flat run) verifica se o cas
                 "inicializado: as variáveis devem ficar constantes.")
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1 (P4): same level of detail as the ANAREDE "Ctrl + R" step.
 _AT8_MAIN = (
-    "**Passo 8 — Primeira execução.** Carregue o **.stb** no ANATEM, execute a simulação e "
-    "leia o relatório de saída.\n\n"
+    "**Passo 8 — Primeira execução.** Carregue o **.stb** no ANATEM.\n\n"
+    "Execute a simulação no ANATEM:\n"
+    "1. Menu superior: **Simulação > Executar**;\n"
+    "2. Ou use o atalho de teclado: **F5** para iniciar a simulação dinâmica.\n\n"
+    "Depois leia o relatório de saída na janela de mensagens.\n\n"
     "**Rodou sem erros?**"
 )
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+RUN_SHORT = "**Simulação > Executar** ou **F5**"
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 CDU_NOTE = (
@@ -482,10 +553,11 @@ _AVR_ADVICE = (
 _PASSO_D_SIN = (
     "**Passo D** — Depois de ajustar e convergir no ANAREDE, salve o **.sav**. Se as mudanças "
     "foram pequenas, **não** é preciso rodar o ANAT0 de novo nem corrigir o DMAQ. Se foram "
-    "grandes, rode o ANAT0 novamente ou atualize o DMAQ manualmente. Depois, rode o ANATEM de novo."
+    "grandes, rode o ANAT0 novamente ou atualize o DMAQ manualmente. Depois, rode o ANATEM de novo "
+    f"({RUN_SHORT})."
 )
 _PASSO_D_SMALL = ("**Passo D** — Depois de ajustar e convergir no ANAREDE, salve o **.sav** e "
-                  "rode o ANATEM de novo.")
+                  f"rode o ANATEM de novo ({RUN_SHORT}).")
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
@@ -497,7 +569,7 @@ def _at9_branch_b(cdu) -> str:
         "associa o CDU à barra do sistema.\n"
         "- **Elos CC**: busque **DCNV** ou **DCNE** (pode haver outros).\n\n"
         "Identifique o equipamento e a barra e ajuste o ponto de operação no ANAREDE como no "
-        "caso da máquina síncrona: salve o **.sav** e rode o ANATEM de novo."
+        f"caso da máquina síncrona: salve o **.sav** e rode o ANATEM de novo ({RUN_SHORT})."
     )
 
 
@@ -518,16 +590,91 @@ _OSC_LARGE = ("Oscilação maior que 0,001 pu **não** é efeito numérico. Iden
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1 (P5): menu of event types. Names and DEVT card codes only — the guide never
+# generates DEVT lines or column layouts.
+# OPEN: the codes come from tester feedback and are not yet validated.
+# (label, description, codes, what the event needs, keywords for the text fallback)
+EVENT_TYPES = [
+    ("Curto-circuito",
+     "aplicação de defeito com instante de início e instante de abertura dos disjuntores "
+     "para isolamento da falta", "APCB, APCC, APCL",
+     "**onde** é o defeito (barra ou linha), **quando** ele começa (instante de aplicação) e "
+     "**quando** termina (instante de abertura dos disjuntores que isolam a falta)",
+     ("curto", "curto circuito", "defeito", "falta", "apcb", "apcc", "apcl")),
+    ("Perda de linha de transmissão",
+     "abertura permanente (ou abertura com religamento) de linha", "ABCI",
+     "**qual linha** (barras de/para e circuito), **quando** ela abre e, se houver "
+     "religamento, **quando** ela volta",
+     ("perda de linha", "linha", "linhas", "lt", "abertura", "religamento", "abci")),
+    ("Desligamento de unidade geradora",
+     "rejeição de um bloco de geração síncrona", "RMGR",
+     "**qual máquina** (barra e grupo), **quando** ela é desligada e **até quando** "
+     "(ou se fica desligada até o fim da simulação)",
+     ("gerador", "geradora", "geradores", "unidade geradora", "geracao", "maquina", "rmgr")),
+    ("Rejeição de carga",
+     "desconexão de blocos de demanda em barras de subestações de transmissão", "MDLP e MDLQ",
+     "**qual barra**, **quanto** de carga (ativa e reativa) é desconectado e **quando** "
+     "(e se volta antes do fim da simulação)",
+     ("rejeicao de carga", "rejeicao", "corte de carga", "desconexao de carga", "mdlp", "mdlq")),
+]
+EVENT_LABELS = [e[0] for e in EVENT_TYPES]
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+EVENT_CODES_NOTE = ("Os códigos acima são os nomes dos cartões do bloco DEVT; a sintaxe exata e as "
+                    "colunas devem ser conferidas na documentação do ANATEM.")
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 def _events_main(step) -> str:
     n = "11" if step == "AT11" else "5"
+    items = "\n".join(f"{i}. **{label}** — {desc} (código{'s' if ',' in codes or ' e ' in codes else ''}: "
+                      f"{codes})" for i, (label, desc, codes, _, _) in enumerate(EVENT_TYPES, 1))
     return (
-        f"**Passo {n} — Simulação de eventos (DEVT).**\n"
-        "1. Insira as perturbações no bloco **DEVT** (ex: curto-circuito, abertura de linha, degrau).\n"
-        "2. Rode o ANATEM.\n"
-        "3. Salve os resultados.\n\n"
-        f"Informe os eventos inseridos ou digite **encerrar**."
+        f"**Passo {n} — Simulação de eventos (DEVT).** Qual evento você quer simular?\n\n"
+        f"{items}\n\n"
+        "Escolha pelo botão, pelo número ou pelo nome, ou digite **encerrar**."
     )
 
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def _event_reminder(label) -> str:
+    needs = next(e[3] for e in EVENT_TYPES if e[0] == label)
+    return (
+        f"**{label}.** Para esse evento, defina: {needs}.\n\n"
+        "Insira o evento no bloco **DEVT** do .stb (a sintaxe e as colunas estão na documentação "
+        f"do ANATEM), rode o ANATEM ({RUN_SHORT}) e salve os resultados.\n\n"
+        f"Clique em **{T_EVENT_DONE}** quando terminar, ou descreva o evento "
+        "(ex: barra, instantes de início e fim)."
+    )
+
+
+def event_text(event) -> str:
+    """One event as readable text: v6.6.1 dict {'type', 'note'} or a v6.6.0 string."""
+    if isinstance(event, dict):
+        note = event.get("note") or ""
+        return (event.get("type") or "Evento") + (f" — {note}" if note else "")
+    return str(event)
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.1 (P1): first ask whether the user has a .SAV and a .STB.
+_ATS2_FILES_Q = ("**Passo 2 — Caso pequeno.** Você já tem um arquivo .SAV e um .STB para o seu caso?")
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# OPEN: the BESS flow says "Histórico > Operações > Salvar"; the expert wrote
+# "Arquivo > Salvar Caso Histórico" — kept as written, to be confirmed.
+# OPEN: the exact location of the example .STB is unconfirmed: no file name or path given.
+ATS2_EXAMPLE_GUIDE = (
+    "**Caso de exemplo.**\n"
+    "- A pasta de instalação padrão do ANAREDE traz uma biblioteca de casos didáticos em formato "
+    "**.PWF**, por exemplo o sistema-teste IEEE de 9 barras (**9BARRAS.PWF**), com o diagrama "
+    "unifilar (**.LST**, ex: `9_barras.lst`) e um arquivo **.STB** desse caso.\n"
+    "- No ANAREDE: abra o **9BARRAS.PWF**, rode o fluxo de potência (regime permanente) e salve "
+    "o caso convergido como arquivo histórico **.SAV** pelo menu "
+    "**Arquivo > Salvar Caso Histórico**.\n"
+    "- O **.STB** do caso de exemplo também fica na pasta de instalação. Se você não o "
+    "encontrar: este guia não consegue criar o .STB; use um .STB de exemplo da instalação do "
+    "ANATEM ou consiga um com um colega.\n\n"
+    f"Quando tiver o .SAV e o .STB, clique em **{T_FILES_CONTINUE}**."
+)
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 _ATS2_ASK = ("**Passo 2 — Caso pequeno: .stb e DMAQ direto.** Informe o nome do arquivo **.sav**, "
@@ -551,14 +698,19 @@ def _ats2_done(data) -> str:
         f"Arquivo **{data['sav_name']}**, caso **{data['case_number']}**, barras de geração "
         f"**{buses}**.\n\n"
         "No arquivo **.stb**:\n"
-        f"1. Aponte para o .sav **{data['sav_name']}**.\n"
-        f"2. Confirme o número do caso (**{data['case_number']}**).\n"
+        "1. **Substituir o arquivo .SAV:** No cartão **DARQ**, localize a declaração de arquivo "
+        "associada à rede de fluxo de potência e atualize para o nome do seu arquivo .SAV "
+        f"convergido (**{data['sav_name']}**).\n"
+        "2. **Conferir o número do caso:** Na linha de leitura do .SAV, confirme se o número do "
+        "caso especificado corresponde exatamente ao número do caso convergido no ANAREDE "
+        f"(**{data['case_number']}**).\n"
         f"3. Use o bloco **DMAQ** diretamente, com as máquinas das barras **{buses}**."
     )
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 def _ats3_main(data) -> str:
+    """After 'Incluir': the v6.6.0 instruction."""
     line = _handoff_equipment_line(data)
     return ("**Passo 3 — Equipamentos (STATCOM, BESS, elo VSC).** Inclua os blocos dos modelos "
             "diretamente no **.stb**, usando **DFNT** ou outros códigos."
@@ -569,13 +721,14 @@ def _ats3_main(data) -> str:
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 _ATS4_MAIN = (
     "**Passo 4 — Teste de inicialização sem eventos (flat run).** Desative os eventos do "
-    "**DEVT**, rode o ANATEM e veja as variáveis no **PLOTCEPEL** (olhe primeiro a escala do "
-    "eixo Y). As variáveis ficaram em linha reta, variando, ou deu erro?"
+    f"**DEVT**, rode o ANATEM ({RUN_SHORT}) e veja as variáveis no **PLOTCEPEL** (olhe primeiro "
+    "a escala do eixo Y). As variáveis ficaram em linha reta, variando, ou deu erro?"
 )
 
 _STEP_DETAILS = {
     "AT1": _AT1_NOTE, "AT2": _AT2_NOTE, "AT3": _AT3_DETAILS, "AT4": _AT4_DETAILS,
-    "AT7": _AT7_DETAILS, "AT9": CDU_NOTE, "ATS2": _ATS2_DETAILS,
+    "AT5": STB_CODES, "AT7": _AT7_DETAILS, "AT9": CDU_NOTE, "ATS2": _ATS2_DETAILS,
+    "AT11": EVENT_CODES_NOTE, "ATS5": EVENT_CODES_NOTE,
 }
 
 
@@ -595,7 +748,11 @@ def question(step, data) -> str:
     if step == "AT5":
         return _at5_main(data)
     if step == "AT6":
-        return _at6_include(data) if data.get("equip") == "pendente" else _at6_main(data)
+        if data.get("equip") == "pendente":
+            return _at6_include(data)
+        if data.get("equipment") == "include":
+            return _at6_main(data)
+        return _equip_branch("**Passo 6 — Equipamentos.**", data)
     if step == "AT7":
         return _AT7_MAIN
     if step == "AT8":
@@ -612,14 +769,28 @@ def question(step, data) -> str:
             return _OSC_QUESTION
         return _AT10_MAIN if step == "AT10" else _ATS4_MAIN
     if step in EVENT_STEPS:
-        if data.get("events"):
+        if data.get("event_pending"):
+            return _event_reminder(data["event_pending"])
+        if data.get("events") and not data.get("event_menu"):
             return f"**{len(data['events'])} evento(s) registrado(s).** Deseja adicionar outro evento ou encerrar?"
         return _events_main(step)
     if step == "ATS2":
+        if ats2_files_question(data):
+            return _ATS2_FILES_Q
+        if data.get("ats2_files") == "guide":
+            return ATS2_EXAMPLE_GUIDE
         return _ats2_question(data)
     if step == "ATS3":
-        return _ats3_main(data)
+        if data.get("equipment") == "include":
+            return _ats3_main(data)
+        return _equip_branch("**Passo 3 — Equipamentos.**", data)
     return ""
+
+
+def ats2_files_question(data) -> bool:
+    """ATS2 starts with 'do you have a .SAV and a .STB?' unless a .sav is already known
+    (handoff, or back from ATS3) or the question was answered."""
+    return not (data or {}).get("sav_name") and not (data or {}).get("ats2_files")
 
 
 def _entry(step, data) -> str:
@@ -630,7 +801,8 @@ def _entry(step, data) -> str:
 
 
 # Per-step sub-states; entering any step starts it clean.
-_SUBSTATE_KEYS = ("at2_confirm", "anat0_error", "cdu", "osc_pending")
+_SUBSTATE_KEYS = ("at2_confirm", "anat0_error", "cdu", "osc_pending", "ats2_files",
+                  "event_pending", "event_menu")
 
 
 def _enter(step, data, prefix=""):
@@ -638,8 +810,9 @@ def _enter(step, data, prefix=""):
         data.pop(k, None)
     if step == "AT2" and data.get("sav_name") and data.get("case_number"):
         data["at2_confirm"] = True
-    if step == "AT6" and data.get("equip") == "pendente":
+    if step in ("AT6", "ATS3"):   # the equipment question is asked again from the start
         data.pop("equip", None)
+        data.pop("equipment", None)
     return step, prefix + _entry(step, data)
 
 
@@ -784,6 +957,54 @@ def parse_buses(text):
     return buses, (text[:m.start()] + " " + text[m.end():])
 
 
+def parse_has_files(text):
+    """ATS2 pre-question: 'yes' | 'no' | None."""
+    n = norm(text)
+    if _has(n, "nao", "exemplo", "nenhum", "falta", "faltam"):
+        return "no"
+    if _has(n, "sim", "s", "tenho", "ja tenho", "possuo", "ok"):
+        return "yes"
+    return None
+
+
+def is_files_continue(text) -> bool:
+    """After the example-case guidance: the user now has the .SAV and the .STB."""
+    n = norm(text)
+    return not _has(n, "nao") and _has(n, "continuar", "continua", "ja tenho", "tenho", "sim",
+                                       "pronto", "consegui", "ok")
+
+
+def parse_equipment_choice(text, data=None):
+    """AT6/ATS3 (and the ✏️ edit): 'none' | 'include' | None. With a BESS/STATCOM bus
+    carried from the ANAREDE study, 'sim'/'manter' keeps the default ('include')."""
+    n = norm(text)
+    conv = _has(n, "convencional", "nenhum", "sem equipamento", "sem equipamentos", "puramente",
+                "eletromecanico", "nao")
+    inc = _has(n, "incluir", "inclua", "bess", "statcom", "hvdc", "vsc", "acoplar", "novos equipamentos")
+    if conv != inc:
+        return "none" if conv else "include"
+    if not conv and handoff_has_equipment_bus(data) and _is_yes(n):
+        return "include"
+    return None
+
+
+def parse_event_type(text):
+    """Event menu: a label of EVENT_TYPES by number (1–4), button text or name; None if unknown.
+    Overlapping words ('curto no fim da linha') resolve in menu order."""
+    n = norm(text)
+    m = re.fullmatch(r"(?:opcao |evento )?([1-4])", n)
+    if m:
+        return EVENT_LABELS[int(m.group(1)) - 1]
+    for label, _, _, _, words in EVENT_TYPES:
+        if n == norm(label) or _has(n, *words):
+            return label
+    return None
+
+
+_EVENT_DONE = {"evento inserido", "inserido", "inseri", "inseri o evento", "pronto", "feito", "ok",
+               "sim", "confirmar", "confirmado", "concluido"}
+
+
 def is_end(text) -> bool:
     """'encerrar', 'quero encerrar', 'pode finalizar o estudo' — never an event or file
     name that merely contains the word ('curto no fim da linha', 'fim.sav')."""
@@ -810,16 +1031,50 @@ def is_restart(text) -> bool:
 # ── summary (sidebar panel + closing message) ─────────────────────────────────
 
 _EQUIP_LABELS = {"incluidos": "modelos incluídos", "ja_no_stb": "já no .stb", "nenhum": "nenhum"}
+EQUIPMENT_NONE_TEXT = "nenhum (estudo convencional)"
 
 
 def equipment_text(data):
+    if data.get("equipment") == "none":
+        return EQUIPMENT_NONE_TEXT
     h = data.get("handoff") or {}
     parts = []
     if h.get("equipment_type"):
         parts.append(h["equipment_type"] + (f" (barra {h['equipment_bus']})" if h.get("equipment_bus") else ""))
     if data.get("equip") in _EQUIP_LABELS:
         parts.append(_EQUIP_LABELS[data["equip"]])
+    elif data.get("equipment") == "include":
+        parts.append("BESS/STATCOM/HVDC a incluir")
     return " · ".join(parts) or None
+
+
+# ── ✏️ edit of the equipment choice (v6.6.1, P2) ──────────────────────────────
+
+EQUIPMENT_EDIT_QUESTION = _EQUIP_BRANCH_Q
+
+
+def equipment_editable(step, data) -> bool:
+    """✏️ on 'Equipamentos' once the choice was made; not at AT6/ATS3 themselves,
+    where the question (with its buttons) is already on screen."""
+    return (data or {}).get("equipment") in ("none", "include") and step not in ("AT6", "ATS3")
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def apply_equipment_edit(data, text):
+    """Answer to the ✏️ equipment question: the confirmation, or None (not understood)."""
+    choice = parse_equipment_choice(text, data)
+    if choice is None:
+        return None
+    data["equipment"] = choice
+    data.pop("equip", None)
+    msg = f"Equipamentos alterado(a) para **{equipment_text(data)}**."
+    if choice == "include":
+        how = ("Inclua os blocos dos modelos diretamente no **.stb**, usando **DFNT** ou outros "
+               "códigos." if data.get("base") == "PEQUENO" else
+               "Inclua no **.stb** as chamadas aos arquivos dos modelos (**DCDU**, **DARQ** ou "
+               "outros), associados às barras dos equipamentos.")
+        msg += " " + how
+    return msg
 
 
 def study_params(data):
@@ -836,6 +1091,8 @@ def study_params(data):
         out.append(("DMAQ", data["dmaq_name"]))
     if data.get("gen_buses"):
         out.append(("Barras de geração", ", ".join(data["gen_buses"])))
+    if data.get("small_case_no_files"):   # v6.6.1 (P1): chose "Não tenho" at ATS2
+        out.append(("Arquivos .SAV/.STB", "sem arquivos próprios (orientação do caso de exemplo)"))
     eq = equipment_text(data)
     if eq:
         out.append(("Equipamentos", eq))
@@ -856,7 +1113,7 @@ def closing_summary(data) -> str:
     events = data.get("events") or []
     body = "\n".join(f"- {k}: **{v}**" for k, v in rows)
     body += "\n- Eventos: " + ("nenhum informado" if not events else "")
-    body += "".join(f"\n  - {e}" for e in events)
+    body += "".join(f"\n  - {event_text(e)}" for e in events)
     return (
         "✅ **Simulação registrada.**\n\n**Resumo do estudo:**\n" + body + "\n\n"
         "Para uma nova simulação, use os botões **⚡ Iniciar simulação ANAREDE** ou "
@@ -915,19 +1172,34 @@ def _flat_step(step, data, text):
 
 
 def _events_step(step, data, text):
+    """AT11 / ATS5 (v6.6.1): menu → reminder → 'Evento inserido' or a description.
+    Each event is stored as {"type": label, "note": free text or ""}."""
     n = norm(text)
     if is_end(text):
+        data.pop("event_pending", None)
+        data.pop("event_menu", None)
         return "IDLE", closing_summary(data)
+    pending = data.get("event_pending")
+    if pending:
+        note = "" if n in _EVENT_DONE else re.sub(r"\s+", " ", text or "").strip()[:300]
+        if n not in _EVENT_DONE and len(note) < 3:
+            return _retry(step, data, "Não identifiquei a resposta.")
+        events = data.setdefault("events", [])
+        events.append({"type": pending, "note": note})
+        data.pop("event_pending", None)
+        data.pop("event_menu", None)
+        return step, (f"Evento {len(events)} registrado: **{event_text(events[-1])}**.\n\n"
+                      "Deseja adicionar outro evento ou encerrar?")
     if n in ("adicionar outro evento", "adicionar", "outro evento", "adicionar evento",
              "mais um evento", "outro"):
-        return step, "Descreva o próximo evento inserido no **DEVT** (ex: curto-circuito na barra 1001 em t = 1 s)."
-    event = re.sub(r"\s+", " ", text or "").strip()
-    if len(event) < 3:
-        return _retry(step, data, "Não identifiquei o evento.")
-    events = data.setdefault("events", [])
-    events.append(event[:300])
-    return step, (f"Evento {len(events)} registrado: **{event[:300]}**.\n\n"
-                  "Deseja adicionar outro evento ou encerrar?")
+        data["event_menu"] = True
+        return step, question(step, data)
+    label = parse_event_type(text)
+    if label is None:
+        return _retry(step, data, "Não identifiquei o tipo de evento. Escolha uma opção de 1 a 4 "
+                                  "(pelo botão, pelo número ou pelo nome).")
+    data["event_pending"] = label
+    return step, _event_reminder(label)
 
 
 def handle(step, data, text):
@@ -1000,6 +1272,15 @@ def handle(step, data, text):
                 data["equip"] = "incluidos"
                 return _enter("AT7", data, "Modelos incluídos no .stb.\n\n")
             return _retry("AT6", data, f"Quando terminar, responda **{T_MODELS_DONE}**.")
+        if data.get("equipment") != "include" and not _has(n, "ja incluidos", "ja estao"):
+            choice = parse_equipment_choice(text, data)
+            if choice is None:
+                return _retry("AT6", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.")
+            data["equipment"] = choice
+            if choice == "none":
+                return _enter("AT7", data, f"Equipamentos: **{EQUIPMENT_NONE_TEXT}**.\n\n")
+            return "AT6", _at6_main(data)
+        data["equipment"] = "include"   # 'já incluídos' typed at the first question
         if _has(n, "ja", "ja incluidos", "ja estao"):
             data["equip"] = "ja_no_stb"
             return _enter("AT7", data, "Modelos já incluídos no .stb.\n\n")
@@ -1053,6 +1334,22 @@ def handle(step, data, text):
         return _events_step(step, data, text)
 
     if step == "ATS2":
+        if data.get("ats2_files") == "guide":
+            if is_files_continue(text):
+                data["ats2_files"] = "yes"
+                return "ATS2", question("ATS2", data)
+            return _retry("ATS2", data, f"Quando tiver os dois arquivos, clique em **{T_FILES_CONTINUE}**.")
+        if ats2_files_question(data) and not parse_sav(text):
+            has = parse_has_files(text)
+            if has == "no":
+                data["ats2_files"] = "guide"
+                data["small_case_no_files"] = True
+                return "ATS2", ATS2_EXAMPLE_GUIDE
+            if has == "yes":
+                data["ats2_files"] = "yes"
+                return "ATS2", question("ATS2", data)
+            return _retry("ATS2", data, f"Responda **{T_HAS_FILES}** ou **{T_NO_FILES}**.")
+        data["ats2_files"] = "yes"   # the .sav typed straight away also answers 'yes'
         sav = parse_sav(text)
         rest = text.replace(sav, " ") if sav else text
         buses, rest = parse_buses(rest)
@@ -1078,6 +1375,14 @@ def handle(step, data, text):
         return "ATS2", question("ATS2", data)
 
     if step == "ATS3":
+        if data.get("equipment") != "include":
+            choice = parse_equipment_choice(text, data)
+            if choice is None:
+                return _retry("ATS3", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.")
+            data["equipment"] = choice
+            if choice == "none":
+                return _enter("ATS4", data, f"Equipamentos: **{EQUIPMENT_NONE_TEXT}**.\n\n")
+            return "ATS3", _ats3_main(data)
         if _has(n, "sem", "nao", "nenhum"):
             data["equip"] = "nenhum"
             return _enter("ATS4", data, "Sem modelos de equipamentos.\n\n")

@@ -1,9 +1,30 @@
 # Single source of truth for the app version (user sidebar, admin sidebar, feedback rows).
-APP_VERSION = "v6.6.0"
+APP_VERSION = "v6.6.1"
 
 # "Novidades da versão" banner shown once per version per user (users.last_seen_version).
 # PT-BR, user-facing. Entries marked DRAFT must be reviewed before deploy.
 RELEASE_NOTES = {
+    "v6.6.1": {
+        "status": "DRAFT — review before deploy",
+        "novidades": [
+            "Caso pequeno no ANATEM: se você ainda não tem um .SAV e um .STB, o guia mostra como "
+            "começar pelo caso de exemplo de 9 barras (9BARRAS.PWF) da instalação do ANAREDE.",
+            "Equipamentos opcionais no ANATEM: escolha “Estudo convencional” para seguir sem "
+            "BESS/STATCOM/HVDC, ou “Incluir BESS/STATCOM/HVDC”.",
+            "Passo 5 (edição do .stb): instruções corrigidas — o .SAV e o DMAQ são trocados no "
+            "cartão DARQ.",
+            "Passo 8: como executar a simulação (menu Simulação > Executar ou a tecla F5).",
+            "Eventos (DEVT): menu com curto-circuito, perda de linha, desligamento de unidade "
+            "geradora e rejeição de carga.",
+        ],
+        "o_que_testar": [
+            "Caso pequeno: responda “Não tenho / quero um caso de exemplo” e siga a orientação.",
+            "Estudo convencional, sem equipamentos, até o fim do fluxo.",
+            "O texto do passo 5 (cartão DARQ).",
+            "O passo 8 (Simulação > Executar / F5).",
+            "O menu de eventos: escolha pelo botão, pelo número e pelo nome.",
+        ],
+    },
     "v6.6.0": {
         "status": "DRAFT — review before deploy",
         "novidades": [

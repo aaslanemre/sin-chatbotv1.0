@@ -58,7 +58,7 @@ SUGGESTIONS = {
     "bess_p_mw": [],          # TODO(domain experts)
     # ANATEM guide (v6.6.0): deliberately empty. Its forms ask for the user's own
     # .sav / DMAQ file names, case number and CDU number; the examples in the step
-    # texts (caso_estudo.sav, caso 5, dmaq_anat0.dma, CDU 1042) are placeholders,
+    # texts (caso_estudo.sav, caso 5, dmaq_anat0, CDU 1042) are placeholders,
     # not commonly used values, so they are not offered as chips.
     "anatem_sav_name": [],
     "anatem_case_number": [],
