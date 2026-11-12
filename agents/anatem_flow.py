@@ -8,13 +8,22 @@ It generates NO ANATEM text: no DEVT, STB, DMAQ, DFNT, TITU, DSIM/EXSI lines.
 
 Main flow (SIN base, ONS or EPE):
   AT1 → AT2 → AT3 (ANAT0) → AT4 → AT5 → AT6 → AT7 → AT8 → (AT9 ⇄ AT8) → AT10 → AT11 → end
+  (v6.6.2: AT10 "Oscilação maior" → AT10B → AT8 or AT9)
 Small case / own network (option 3 at AT1, no ANAT0):
-  AT1 → ATS2 → ATS3 → ATS4 (→ AT9 → ATS4) → ATS5 → end
+  AT1 → ATS2 → ATS3 → ATS4 (→ AT9 → ATS4; → AT10B → ATS4 or AT9) → ATS5 → end
 
 v6.6.1 (revised Word guide + expert feedback P1–P5): ATS2 first asks whether the
 user has a .SAV and a .STB (example-case guidance when not); AT6/ATS3 first ask
 "conventional study or new equipment?"; AT5 uses the DARQ-only wording; AT8/ATS4
 name the menu and F5; AT11/ATS5 offer a menu of event types (names only).
+
+v6.6.2 (Thomas's feedback, 11–12 Nov): a pasted ANAT0 error is read at AT3; a typed
+question about the DMAQ path at AT5 and "CDU … não está no DMAQ" at AT9 are answered
+deterministically (intercept, before the app routes '?' questions to the LLM);
+unmatched typed text of 4+ words at a button step goes to the free chat (reply None);
+AT5/ATS2 explain DARQ by columns; AT9 Passo C has GOV/AVR/PSS; "Oscilação maior" goes
+to the new step AT10B (controles atuando); events show the card names, the manual
+link and a 5th option "Outro" answered by the free chat.
 
 handle(step, data, text) -> (new_step, reply). new_step "IDLE" means the
 simulation ends (the app resets its state). `data` (sim_data) is mutated in place
@@ -33,6 +42,7 @@ ANATEM manual (codes, menus and columns are not checked here).
 import re
 import unicodedata
 
+from agents.anatem_guard import MANUAL_URL as MANUAL_DEVT_URL, OTHER_EVENT_RULE
 from agents.ux import with_details
 
 SIM_TYPE = "ANATEM"
@@ -40,7 +50,9 @@ PROGRAM_CHOICE_STEP = "IDLE_PROGRAM_CHOICE"
 
 MAIN_STEPS = ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT10", "AT11"]
 SMALL_STEPS = ["AT1", "ATS2", "ATS3", "ATS4", "ATS5"]
-ALL_STEPS = MAIN_STEPS + SMALL_STEPS[1:]
+# v6.6.2: AT10B (controles atuando) is a detour of AT10 and ATS4, reached only from
+# "Oscilação maior"; it is outside the "Passo N de M" sequences.
+ALL_STEPS = MAIN_STEPS + SMALL_STEPS[1:] + ["AT10B"]
 EVENT_STEPS = ("AT11", "ATS5")
 
 STEP_LABELS = {
@@ -54,6 +66,7 @@ STEP_LABELS = {
     "AT8": "ANATEM 8: Primeira execução",
     "AT9": "ANATEM 9: Erro de inicialização (CDU)",
     "AT10": "ANATEM 10: Verificação das variáveis",
+    "AT10B": "ANATEM 10B: Controles atuando",
     "AT11": "ANATEM 11: Eventos (DEVT)",
     "ATS2": "ANATEM caso pequeno 2: .stb e DMAQ",
     "ATS3": "ANATEM caso pequeno 3: Equipamentos",
@@ -73,6 +86,7 @@ NUDGE_LABELS = {
     "AT8": "o resultado da execução no ANATEM",
     "AT9": "o erro de CDU",
     "AT10": "as variáveis plotadas",
+    "AT10B": "os controles atuando",
     "AT11": "os eventos (DEVT)",
     "ATS2": "o .sav, o caso e as barras de geração",
     "ATS3": "os modelos dos equipamentos",
@@ -99,7 +113,8 @@ T_READY = "Pronto"
 T_IN_DMAQ = "É de máquina síncrona (está no DMAQ)"
 T_NOT_DMAQ = "Não está no DMAQ (eólica/FV/elo CC)"
 T_GOV = "Regulador de velocidade (GOV)"
-T_AVR = "Regulador de tensão (AVR) ou PSS"
+T_AVR = "Regulador de tensão (AVR)"
+T_PSS = "Estabilizador (PSS)"   # v6.6.2
 T_FLAT, T_VARYING = "Flat (constante)", "Variando"
 T_SMALL_OSC = "Oscilação ≤ 0,001 pu (ondas triangulares/escadinha)"
 T_LARGE_OSC = "Oscilação maior"
@@ -117,6 +132,9 @@ T_INCLUDE_EQUIP_LABEL, T_INCLUDE_EQUIP = "Incluir BESS/STATCOM/HVDC", "Com equip
 T_EVENT_DONE = "Evento inserido"
 START_TEXT = {"ANAREDE": "Iniciar simulação ANAREDE", "ANATEM": "Iniciar simulação ANATEM"}
 HANDOFF_TEXT = "Continuar para o ANATEM"
+# v6.6.2
+T_CTRL_ADJUSTED, T_NO_CTRL = "Sim, ajustei e vou rodar de novo", "Não há controle atuando"
+T_OTHER_EVENT = "Outro / descrever o que quero analisar"
 
 
 # ── normalisation ─────────────────────────────────────────────────────────────
@@ -382,17 +400,98 @@ _AT3_DETAILS = (
     "entre as máquinas e ajusta o número de unidades ao ponto de operação do caso."
 )
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-_AT3_ERROR = (
-    "**Erro no ANAT0.** O ANAT0 indica **violação de limite de potência ativa ou reativa** ao "
-    "dividir a geração da barra entre as máquinas: a barra, no ANAREDE, está num ponto de "
-    "operação incompatível com a capacidade das máquinas cadastradas.\n\n"
-    "**Como corrigir:**\n"
-    "1. Volte ao ANAREDE.\n"
-    "2. Ajuste a geração ativa, ou alivie a geração/absorção de reativo dessa barra.\n"
-    "3. Salve o **.sav** novamente.\n"
-    "4. Rode o ANAT0 de novo.\n\n"
-    "**O ANAT0 rodou sem erros?**"
+# v6.6.2 (3a): Thomas's procedure; ANAT0 runs inside the ANAREDE (no "volte ao ANAREDE").
+_AT3_FIX_STEPS = (
+    "1. Abra o **relatório de execução da Etapa 1** do ANAT0.\n"
+    "2. Use **Localizar (Ctrl+F)** e busque a palavra **Erro**. Pode haver um ou mais erros.\n"
+    "3. Analise cada erro e corrija alterando o **despacho das máquinas** ou ajustando melhor o caso.\n"
+    "4. Rode o **fluxo de potência** novamente e confira se está **convergido**.\n"
+    "5. Salve o **.SAV**.\n"
+    "6. Execute o **ANAT0** novamente."
 )
+_AT3_RAN_Q = "**O ANAT0 rodou sem erros?**"
+_AT3_ERROR = (
+    "**Erro no ANAT0.** Como corrigir:\n" + _AT3_FIX_STEPS + "\n\n"
+    "Se quiser, cole aqui o trecho do erro que eu te ajudo a interpretar.\n\n" + _AT3_RAN_Q
+)
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# Kept in "Detalhes": why the ANAT0 fails (v6.6.0 explanation).
+_AT3_ERROR_WHY = (
+    "O ANAT0 indica **violação de limite de potência ativa ou reativa** ao dividir a geração da "
+    "barra entre as máquinas: a barra, no ANAREDE, está num ponto de operação incompatível com a "
+    "capacidade das máquinas cadastradas."
+)
+
+
+def at3_error_message() -> str:
+    """'Deu erro' at AT3: Thomas's procedure + why the ANAT0 fails in Detalhes."""
+    return with_details(_AT3_ERROR, _AT3_ERROR_WHY)
+
+
+# ── 2a: an ANAT0 error pasted at AT3 ──────────────────────────────────────────
+
+_ANAT0_ERR_RE = re.compile(r"\*{3}\s*ERRO\s*-\s*ANAT01-(\d+)", re.I)
+_ANAT0_190_RE = re.compile(
+    r"potencia\s+gerada\s*\(\s*(\d+(?:[.,]\d+)?)\s*mw\s*\)\s*inferior\s+ao\s+minimo\s*"
+    r"\(\s*(\d+(?:[.,]\d+)?)\s*mw\s*\)", re.I)
+
+
+def _strip_accents(text) -> str:
+    t = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def parse_anat0_error(text):
+    """{'code', 'bus', 'group', 'name', 'gen', 'min'} for a pasted '*** ERRO - ANAT01-NNN';
+    None when the message has no such line. Bus/group/name only from the record line that
+    follows a '(Nb' header; gen/min only from 'Potencia gerada (X MW) inferior ao minimo (Y MW)'."""
+    t = _strip_accents(text)
+    m = _ANAT0_ERR_RE.search(t)
+    if not m:
+        return None
+    err = {"code": f"ANAT01-{m.group(1)}", "bus": None, "group": None, "name": None,
+           "gen": None, "min": None}
+    lines = [ln.strip() for ln in t.splitlines()]
+    for i, ln in enumerate(lines):
+        if not ln.startswith("(Nb"):
+            continue
+        rec = next((r for r in lines[i + 1:] if r), "")
+        toks = rec.split()
+        ints = []
+        for tok in toks:
+            if not re.fullmatch(r"\d+", tok):
+                break
+            ints.append(tok)
+        name = next((tok for tok in toks[len(ints):] if re.fullmatch(r"\w+", tok)), None)
+        if len(ints) >= 2 and name:
+            err.update(bus=str(int(ints[0])), group=str(int(ints[1])), name=name)
+        break
+    p = _ANAT0_190_RE.search(t)
+    if p:
+        err["gen"], err["min"] = p.group(1), p.group(2)
+    return err
+
+
+def _num(value) -> float:
+    return float(str(value).replace(",", "."))
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def anat0_error_reply(err) -> str:
+    """ANAT01-190 with both powers (Y > X): the fix. Any other code: the code (+ bus) and
+    the generic procedure — the meaning of other codes is never described."""
+    code = err["code"]
+    where = f" na barra **{err['bus']} ({err['name']})**" if err.get("bus") else ""
+    if code == "ANAT01-190" and err.get("gen") and err.get("min") and _num(err["min"]) > _num(err["gen"]):
+        x, y = err["gen"], err["min"]
+        bus = f" {err['bus']}" if err.get("bus") else " indicada no erro"
+        return (
+            f"Erro **{code}**{where}: a potência gerada (**{x} MW**) está abaixo do mínimo das "
+            f"máquinas (**{y} MW**). Como {y} > {x}: no ANAREDE, aumente a geração da barra{bus} "
+            f"para pelo menos **{y} MW** (ou ajuste o despacho das máquinas), rode o fluxo de "
+            "potência, confira se convergiu, salve o .SAV e execute o ANAT0 novamente.\n\n" + _AT3_RAN_Q
+        )
+    return f"Erro **{code}**{where}.\n\n**Como corrigir:**\n{_AT3_FIX_STEPS}\n\n{_AT3_RAN_Q}"
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 # v6.6.1: neutral example. OPEN: the Word file uses "dmaq_anat0.dma" here and ".DMA/.DAT"
@@ -408,20 +507,42 @@ def _known(value) -> str:
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-# v6.6.1 (P3): wording of the revised Word file; only DARQ in the instructions.
+# v6.6.2 (3b): DARQ explained by columns (Thomas's text).
+def _darq_sav_items(sav, case, anat0=True) -> str:
+    processed = " e processado no ANAT0" if anat0 else ""
+    return (
+        "1. **Substituir o arquivo .SAV:** no cartão **DARQ**, identifique a linha cujo tipo de "
+        "arquivo (primeira coluna) é **SAV**. A segunda coluna é o **número do caso** e a terceira "
+        "é o **nome do arquivo com o caminho**. Altere a **terceira coluna** para o seu arquivo "
+        f".SAV{_known(sav)}.\n"
+        "2. **Conferir o número do caso:** na mesma linha, altere a **segunda coluna** para o número "
+        f"do caso convergido no ANAREDE{processed}{_known(case)}."
+    )
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 def _at5_main(data) -> str:
     return (
         "**Passo 5 — Edição do .stb.** Abra o arquivo **.stb** da base em um editor de texto "
         "e faça três ajustes:\n"
-        "1. **Substituir o arquivo .SAV:** No cartão **DARQ**, localize a declaração de arquivo "
-        "associada à rede de fluxo de potência e atualize para o nome do seu arquivo .SAV "
-        f"convergido{_known(data.get('sav_name'))}.\n"
-        "2. **Conferir o número do caso:** Na linha de leitura do .SAV, confirme se o número do "
-        "caso especificado corresponde exatamente ao número do caso convergido no ANAREDE e "
-        f"processado no ANAT0{_known(data.get('case_number'))}.\n"
-        "3. **Substituir o arquivo DMAQ:** No cartão **DARQ**, substitua a referência do arquivo "
-        "DMAQ original pelo caminho do novo arquivo gerado pelo ANAT0"
-        f"{_known(data.get('dmaq_name'))}.\n\n"
+        + _darq_sav_items(data.get("sav_name"), data.get("case_number")) + "\n"
+        "3. **Substituir o arquivo DMAQ:** no cartão **DARQ**, na linha cujo tipo de arquivo "
+        "(primeira coluna) é **DAT** e que aponta para o DMAQ original da base, troque o caminho "
+        f"pelo do novo arquivo gerado pelo ANAT0{_known(data.get('dmaq_name'))}, incluindo a pasta "
+        "onde ele foi salvo.\n\n"
+        f"Responda **{T_CONFIGURED}** quando terminar."
+    )
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.2 (2b). Source: Thomas's own example line (type DAT + path).
+def at5_dmaq_answer(data) -> str:
+    return (
+        "No cartão **DARQ**, procure a linha cujo tipo de arquivo (primeira coluna) é **DAT** e que "
+        "aponta para o arquivo DMAQ original da base (por exemplo, um arquivo DMAQ_xxx.dat dentro da "
+        "pasta da base). Troque o caminho dessa linha pelo caminho do novo arquivo gerado pelo ANAT0"
+        f"{_known(data.get('dmaq_name'))}, incluindo a pasta onde ele foi salvo (por exemplo, a pasta "
+        "ANAT0).\n\n"
         f"Responda **{T_CONFIGURED}** quando terminar."
     )
 
@@ -534,7 +655,8 @@ def _at9_branch_a(data, cdu) -> str:
         f"número **{cdu}**.\n\n"
         "**Passo B** — As primeiras colunas desse registro trazem o **número da barra** e o "
         "**grupo** do gerador.\n\n"
-        "**Passo C** — O CDU é de qual controle?"
+        "**Passo C** — O CDU é de qual controle? Regulador de velocidade (GOV), regulador de "
+        "tensão (AVR) ou estabilizador (PSS)?"
     )
 
 
@@ -544,11 +666,15 @@ _GOV_ADVICE = (
     "levemente o **Pg** da máquina (ou aumente, se estiver abaixo do mínimo técnico)."
 )
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-_AVR_ADVICE = (
-    "**Regulador de tensão (AVR) ou PSS** → problema de **tensão/reativo**. Melhore o perfil de "
-    "tensão nessa barra (mais perto de **1,0 pu**) ou alivie a injeção/absorção de reativo da "
-    "máquina usando taps ou compensadores próximos."
+# v6.6.2 (3c): AVR and PSS share the voltage/reactive advice (Thomas's guide groups them).
+_VOLTAGE_ADVICE = (
+    "problema de **tensão/reativo**. Melhore o perfil de tensão nessa barra (mais perto de "
+    "**1,0 pu**) ou alivie a injeção/absorção de reativo da máquina usando taps ou compensadores "
+    "próximos."
 )
+_AVR_ADVICE = "**Regulador de tensão (AVR)** → " + _VOLTAGE_ADVICE
+# PENDING REVIEW: PSS-specific advice in v6.6.3
+_PSS_ADVICE = "**Estabilizador (PSS)** → " + _VOLTAGE_ADVICE
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 _PASSO_D_SIN = (
     "**Passo D** — Depois de ajustar e convergir no ANAREDE, salve o **.sav**. Se as mudanças "
@@ -573,6 +699,26 @@ def _at9_branch_b(cdu) -> str:
     )
 
 
+# v6.6.2 (2c): "CDU 1042 … não encontrei esse CDU no arquivo DMAQ" typed at AT9.
+_NOT_IN_DMAQ_RE = re.compile(
+    r"\bnao (?:esta|estava|encontrei|encontro|achei|acho|aparece)\b(?: \w+){0,5}? dmaq\b"
+    r"|\bfora do dmaq\b")
+_IN_DMAQ_RE = re.compile(r"\besta (?:\w+ ){0,3}?dmaq\b|\bmaquina sincrona\b")
+_CDU_NUM_RE = re.compile(r"\bcdu\s*(?:n(?:[ºo°.]|umero|úmero)?\s*)?(\d{1,6})(?![.,]?\d)", re.I)
+
+
+def parse_cdu_where(text):
+    """(cdu number or None, 'outro' | 'dmaq' | None) from one typed sentence."""
+    n = norm(text)
+    m = _CDU_NUM_RE.search(text or "")
+    num = str(int(m.group(1))) if m and int(m.group(1)) > 0 else parse_cdu(text)
+    if _NOT_IN_DMAQ_RE.search(n):
+        return num, "outro"
+    if _IN_DMAQ_RE.search(n) and not re.search(r"\bnao esta\b", n):
+        return num, "dmaq"
+    return num, None
+
+
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 _AT10_MAIN = (
     "**Passo 10 — Verificação das variáveis (PLOTCEPEL).** Abra os gráficos no **PLOTCEPEL**. "
@@ -584,9 +730,29 @@ _OSC_QUESTION = ("Qual o tamanho da oscilação? (confira a **escala do eixo Y**
 _OSC_SMALL = ("Oscilação **≤ 0,001 pu**: é precisão numérica do integrador — pode ignorar. "
               "O caso está **inicializado corretamente**.")
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-_OSC_LARGE = ("Oscilação maior que 0,001 pu **não** é efeito numérico. Identifique **qual "
-              "variável** está variando e a **qual máquina/CDU** ela pertence; depois ajuste o "
-              "ponto de operação.")
+# v6.6.2 (3d): "Oscilação maior" → AT10B, controls acting (Thomas's text).
+_AT10B_MAIN = (
+    "Oscilações maiores que 0,001 pu não são efeito numérico.\n"
+    "1. Olhe o **log/relatório do ANATEM** e procure **avisos de controles atuando**.\n"
+    "2. Alguns controles atuam conforme o ponto de operação ou o nível de tensão do caso, por "
+    "exemplo o **chaveamento de bancos de reatores/capacitores dos elos HVDC** para controle de "
+    "tensão. É comum que atuem mesmo em regime permanente e causem oscilações.\n"
+    "3. Se for isso, vá ao equipamento cujo controle está atuando e coloque o sistema num ponto de "
+    "operação que evite a atuação, normalmente **adiantando a manobra** que o controle faria (ex.: "
+    "se o controle liga um reator no ANATEM, ligue esse reator no ANAREDE, salve o caso e rode o "
+    "ANATEM de novo).\n\n"
+    "Encontrou algum controle atuando?"
+)
+
+
+def parse_ctrl_acting(text):
+    """AT10B: 'adjusted' | 'none' | None."""
+    n = norm(text)
+    if _has(n, "nao", "nenhum", "nenhuma", "sem controle"):
+        return "none"
+    if _has(n, "sim", "ajustei", "encontrei", "achei", "vou rodar", "rodar de novo"):
+        return "adjusted"
+    return None
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
@@ -618,6 +784,7 @@ EVENT_TYPES = [
      ("rejeicao de carga", "rejeicao", "corte de carga", "desconexao de carga", "mdlp", "mdlq")),
 ]
 EVENT_LABELS = [e[0] for e in EVENT_TYPES]
+OTHER_EVENT = "Outro"   # v6.6.2 (4b): stored as {"type": "Outro", "note": <user text>}
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 EVENT_CODES_NOTE = ("Os códigos acima são os nomes dos cartões do bloco DEVT; a sintaxe exata e as "
                     "colunas devem ser conferidas na documentação do ANATEM.")
@@ -628,6 +795,7 @@ def _events_main(step) -> str:
     n = "11" if step == "AT11" else "5"
     items = "\n".join(f"{i}. **{label}** — {desc} (código{'s' if ',' in codes or ' e ' in codes else ''}: "
                       f"{codes})" for i, (label, desc, codes, _, _) in enumerate(EVENT_TYPES, 1))
+    items += f"\n{len(EVENT_TYPES) + 1}. **{T_OTHER_EVENT}**"
     return (
         f"**Passo {n} — Simulação de eventos (DEVT).** Qual evento você quer simular?\n\n"
         f"{items}\n\n"
@@ -636,15 +804,56 @@ def _events_main(step) -> str:
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+MANUAL_LINE = f"Sintaxe e campos de cada cartão: manual do ANATEM (CEPEL) — {MANUAL_DEVT_URL}"
+
+
+def event_cards(label) -> list:
+    codes = next(e[2] for e in EVENT_TYPES if e[0] == label)
+    return [c.strip() for c in re.split(r",| e ", codes) if c.strip()]
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 def _event_reminder(label) -> str:
     needs = next(e[3] for e in EVENT_TYPES if e[0] == label)
+    cards = event_cards(label)
+    noun = "cartões" if len(cards) > 1 else "cartão"
     return (
-        f"**{label}.** Para esse evento, defina: {needs}.\n\n"
-        "Insira o evento no bloco **DEVT** do .stb (a sintaxe e as colunas estão na documentação "
-        f"do ANATEM), rode o ANATEM ({RUN_SHORT}) e salve os resultados.\n\n"
+        f"**{label}** — {noun} do DEVT: **{', '.join(cards)}**\n\n"
+        f"Para esse evento, defina: {needs}.\n\n"
+        f"Insira o evento no bloco **DEVT** do .stb, rode o ANATEM ({RUN_SHORT}) e salve os "
+        "resultados.\n\n"
+        f"{MANUAL_LINE}\n\n"
         f"Clique em **{T_EVENT_DONE}** quando terminar, ou descreva o evento "
         "(ex: barra, instantes de início e fim)."
     )
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+_OTHER_EVENT_ASK = (
+    f"**{T_OTHER_EVENT}.** Descreva em poucas palavras o que você quer analisar no ANATEM (por "
+    "exemplo, o comportamento de uma usina depois da perda de uma linha). Eu sugiro o tipo de "
+    "evento e o nome do cartão do DEVT.\n\n" + MANUAL_LINE
+)
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+OTHER_EVENT_TAIL = (
+    f"\n\n---\nClique em **{T_EVENT_DONE}** quando inserir o evento, em **{T_ADD_EVENT}** "
+    f"ou em **{T_END}**."
+)
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.2 (4c): never fault times nor Procedimentos de Rede submodules.
+FAULT_TIMES_TEXT = ("Os tempos de eliminação de defeito devem seguir os critérios dos "
+                    "Procedimentos de Rede do ONS.")
+_FAULT_TIME_RE = re.compile(
+    r"\b(?:tempos?|instantes?|duracao|quanto tempo)\b(?: \w+){0,4}? "
+    r"(?:eliminacao|abertura|defeito|falta|curto)\b")
+
+
+def asks_fault_times(text) -> bool:
+    """'qual o tempo de eliminação do defeito?', 'quanto tempo dura o curto?'"""
+    n = norm(text)
+    asks = is_question(text) or _has(n, "qual", "quais", "quanto", "quantos", "sugere", "sugira",
+                                     "recomenda", "usar", "uso", "devo")
+    return asks and bool(_FAULT_TIME_RE.search(n))
 
 
 def event_text(event) -> str:
@@ -698,12 +907,7 @@ def _ats2_done(data) -> str:
         f"Arquivo **{data['sav_name']}**, caso **{data['case_number']}**, barras de geração "
         f"**{buses}**.\n\n"
         "No arquivo **.stb**:\n"
-        "1. **Substituir o arquivo .SAV:** No cartão **DARQ**, localize a declaração de arquivo "
-        "associada à rede de fluxo de potência e atualize para o nome do seu arquivo .SAV "
-        f"convergido (**{data['sav_name']}**).\n"
-        "2. **Conferir o número do caso:** Na linha de leitura do .SAV, confirme se o número do "
-        "caso especificado corresponde exatamente ao número do caso convergido no ANAREDE "
-        f"(**{data['case_number']}**).\n"
+        + _darq_sav_items(data["sav_name"], data["case_number"], anat0=False) + "\n"
         f"3. Use o bloco **DMAQ** diretamente, com as máquinas das barras **{buses}**."
     )
 
@@ -768,7 +972,14 @@ def question(step, data) -> str:
         if data.get("osc_pending"):
             return _OSC_QUESTION
         return _AT10_MAIN if step == "AT10" else _ATS4_MAIN
+    if step == "AT10B":
+        return _AT10B_MAIN
     if step in EVENT_STEPS:
+        if data.get("event_other"):
+            return _OTHER_EVENT_ASK
+        if data.get("event_pending") == OTHER_EVENT:
+            return (f"**Evento: {event_text({'type': OTHER_EVENT, 'note': data.get('event_note')})}**."
+                    + OTHER_EVENT_TAIL)
         if data.get("event_pending"):
             return _event_reminder(data["event_pending"])
         if data.get("events") and not data.get("event_menu"):
@@ -802,7 +1013,7 @@ def _entry(step, data) -> str:
 
 # Per-step sub-states; entering any step starts it clean.
 _SUBSTATE_KEYS = ("at2_confirm", "anat0_error", "cdu", "osc_pending", "ats2_files",
-                  "event_pending", "event_menu")
+                  "event_pending", "event_menu", "event_other", "event_note", "event_llm")
 
 
 def _enter(step, data, prefix=""):
@@ -916,13 +1127,17 @@ def parse_where(text):
 
 
 def parse_ctrl(text):
+    """'gov' | 'avr' | 'pss' | None. 'AVR ou PSS' (v6.6.1 button) → 'avr' (same advice)."""
     n = norm(text)
     gov = _has(n, "gov", "velocidade", "regulador de velocidade", "potencia ativa")
-    avr = _has(n, "avr", "pss", "tensao", "regulador de tensao", "reativo")
-    if gov and not avr:
+    avr = _has(n, "avr", "tensao", "regulador de tensao", "reativo")
+    pss = _has(n, "pss", "estabilizador")
+    if gov and not (avr or pss):
         return "gov"
     if avr and not gov:
         return "avr"
+    if pss and not gov:
+        return "pss"
     return None
 
 
@@ -989,12 +1204,15 @@ def parse_equipment_choice(text, data=None):
 
 
 def parse_event_type(text):
-    """Event menu: a label of EVENT_TYPES by number (1–4), button text or name; None if unknown.
+    """Event menu: a label of EVENT_TYPES by number (1–4), button text or name; OTHER_EVENT
+    for 5 / the 'Outro / descrever…' button; None if unknown.
     Overlapping words ('curto no fim da linha') resolve in menu order."""
     n = norm(text)
-    m = re.fullmatch(r"(?:opcao |evento )?([1-4])", n)
+    m = re.fullmatch(r"(?:opcao |evento )?([1-5])", n)
     if m:
-        return EVENT_LABELS[int(m.group(1)) - 1]
+        return (EVENT_LABELS + [OTHER_EVENT])[int(m.group(1)) - 1]
+    if n == norm(T_OTHER_EVENT) or _has(n, "descrever", "outro tipo", "outro evento diferente"):
+        return OTHER_EVENT
     for label, _, _, _, words in EVENT_TYPES:
         if n == norm(label) or _has(n, *words):
             return label
@@ -1129,12 +1347,24 @@ ENDED_TEXT = ("Sessão de simulação encerrada. Os resultados ficam registrados
 # ── state machine ─────────────────────────────────────────────────────────────
 
 _BACK = {"AT2": "AT1", "AT3": "AT2", "AT4": "AT3", "AT5": "AT4", "AT6": "AT5", "AT7": "AT6",
-         "AT8": "AT7", "AT10": "AT8", "AT11": "AT10",
+         "AT8": "AT7", "AT10": "AT8", "AT10B": "AT10", "AT11": "AT10",
          "ATS2": "AT1", "ATS3": "ATS2", "ATS4": "ATS3", "ATS5": "ATS4"}
 
 
 def _retry(step, data, head):
     return step, f"{head}\n\n{question(step, data)}"
+
+
+FREE_CHAT_MIN_WORDS = 4
+
+
+def _unmatched(step, data, head, text):
+    """v6.6.2 (2d): typed text that matches no accepted answer. 4+ words → free chat
+    (reply None: the app asks the LLM, keeps the step and appends the ↩️ nudge);
+    shorter → today's clarification."""
+    if len(norm(text).split()) >= FREE_CHAT_MIN_WORDS:
+        return step, None
+    return _retry(step, data, head)
 
 
 def _cdu_finish(data, advice, passo_d=True):
@@ -1151,15 +1381,17 @@ def _to_cdu(data, ret, prefix=""):
 
 
 def _flat_step(step, data, text):
-    """AT10 (main) and ATS4 (small case): flat / varying (≤ 0.001 pu rule) / error."""
+    """AT10 (main) and ATS4 (small case): flat / varying (≤ 0.001 pu rule) / error.
+    v6.6.2 (3d): a larger oscillation goes to AT10B (controls acting), not to AT9."""
     nxt, ret = ("AT11", "AT8") if step == "AT10" else ("ATS5", "ATS4")
     if data.get("osc_pending"):
         osc = parse_osc(text)
         if osc == "small":
             return _enter(nxt, data, _OSC_SMALL + "\n\n---\n\n")
         if osc == "large":
-            return _to_cdu(data, ret, _OSC_LARGE + "\n\n---\n\n")
-        return _retry(step, data, "Não identifiquei o tamanho da oscilação.")
+            data["ctrl_return"] = step
+            return _enter("AT10B", data)
+        return _unmatched(step, data, "Não identifiquei o tamanho da oscilação.", text)
     r = parse_flat(text)
     if r == "flat":
         return _enter(nxt, data, "Variáveis constantes: o caso está **inicializado corretamente**.\n\n---\n\n")
@@ -1168,7 +1400,21 @@ def _flat_step(step, data, text):
         return step, _OSC_QUESTION
     if r == "error":
         return _to_cdu(data, ret)
-    return _retry(step, data, "Não identifiquei o resultado.")
+    return _unmatched(step, data, "Não identifiquei o resultado.", text)
+
+
+def _ctrl_acting_step(data, text):
+    """AT10B: adjusted → run again (AT8, or ATS4 in the small case); none → AT9 (CDU path)."""
+    ret = data.get("ctrl_return") or "AT10"
+    r = parse_ctrl_acting(text)
+    if r == "adjusted":
+        data.pop("ctrl_return", None)
+        return _enter("AT8" if ret == "AT10" else "ATS4", data, "Controle ajustado no ANAREDE.\n\n")
+    if r == "none":
+        data.pop("ctrl_return", None)
+        return _to_cdu(data, "AT8" if ret == "AT10" else "ATS4",
+                       "Sem controles atuando: vamos verificar o ponto de operação pelo CDU.\n\n")
+    return _unmatched("AT10B", data, f"Responda **{T_CTRL_ADJUSTED}** ou **{T_NO_CTRL}**.", text)
 
 
 def _events_step(step, data, text):
@@ -1176,10 +1422,30 @@ def _events_step(step, data, text):
     Each event is stored as {"type": label, "note": free text or ""}."""
     n = norm(text)
     if is_end(text):
+        if data.get("event_pending") == OTHER_EVENT:   # described and answered: keep it
+            data.setdefault("events", []).append(
+                {"type": OTHER_EVENT, "note": data.pop("event_note", "") or ""})
         data.pop("event_pending", None)
         data.pop("event_menu", None)
         return "IDLE", closing_summary(data)
     pending = data.get("event_pending")
+    if pending == OTHER_EVENT:
+        add = n in ("adicionar outro evento", "adicionar", "outro evento", "adicionar evento",
+                    "mais um evento")
+        if n in _EVENT_DONE or add:
+            events = data.setdefault("events", [])
+            events.append({"type": OTHER_EVENT, "note": data.pop("event_note", "") or ""})
+            data.pop("event_pending", None)
+            data.pop("event_menu", None)
+            head = f"Evento {len(events)} registrado: **{event_text(events[-1])}**."
+            if add:
+                data["event_menu"] = True
+                return step, f"{head}\n\n{question(step, data)}"
+            return step, f"{head}\n\nDeseja adicionar outro evento ou encerrar?"
+        if len(n.split()) >= FREE_CHAT_MIN_WORDS:   # a follow-up question: free chat again
+            data["event_llm"] = True
+            return step, None
+        return _retry(step, data, "Não identifiquei a resposta.")
     if pending:
         note = "" if n in _EVENT_DONE else re.sub(r"\s+", " ", text or "").strip()[:300]
         if n not in _EVENT_DONE and len(note) < 3:
@@ -1196,14 +1462,81 @@ def _events_step(step, data, text):
         return step, question(step, data)
     label = parse_event_type(text)
     if label is None:
-        return _retry(step, data, "Não identifiquei o tipo de evento. Escolha uma opção de 1 a 4 "
-                                  "(pelo botão, pelo número ou pelo nome).")
+        return _unmatched(step, data, "Não identifiquei o tipo de evento. Escolha uma opção de 1 a 5 "
+                                      "(pelo botão, pelo número ou pelo nome).", text)
+    if label == OTHER_EVENT:
+        data["event_other"] = True
+        return step, _OTHER_EVENT_ASK
     data["event_pending"] = label
     return step, _event_reminder(label)
 
 
+def _other_event_note(step, data, text):
+    """4b: the description typed after 'Outro' → free chat with OTHER_EVENT_RULE."""
+    note = re.sub(r"\s+", " ", text or "").strip()[:300]
+    if len(note) < 3:
+        return _retry(step, data, "Descreva o que você quer analisar.")
+    data.pop("event_other", None)
+    data["event_pending"] = OTHER_EVENT
+    data["event_note"] = note
+    data["event_llm"] = True
+    return step, None
+
+
+def llm_extras(data):
+    """(extra instruction, tail replacing the ↩️ nudge) for the free-chat answer of the
+    'Outro' event; (None, None) otherwise. Pops the one-shot flag."""
+    if data and data.pop("event_llm", None):
+        return OTHER_EVENT_RULE, OTHER_EVENT_TAIL
+    return None, None
+
+
+_AT5_DMAQ_WORDS = ("dmaq", "dat", "caminho", "path", "pasta", "configurar")
+
+
+def intercept(step, data, text):
+    """v6.6.2: deterministic answers to TYPED text that must win over the free-chat
+    routing of '?' questions (the app calls this first). (new_step, reply) or None.
+      any step     → a question about fault times (4c)
+      AT3          → a pasted '*** ERRO - ANAT01-NNN' (2a)
+      AT5          → a question about the DMAQ path / DAT line (2b)
+      AT9          → 'CDU N … não está / está no DMAQ' (2c)
+      AT11 / ATS5  → the description after 'Outro' (4b, answered by the free chat)"""
+    if step not in ALL_STEPS:
+        return None
+    text = text or ""
+    n = norm(text)
+    if is_end(text) or is_help(text) or is_back(text):
+        return None
+    if asks_fault_times(text):
+        q = question(step, data)
+        return step, FAULT_TIMES_TEXT + (f"\n\n---\n\n{q}" if q else "")
+    if step == "AT3":
+        err = parse_anat0_error(text)
+        if err:
+            data["anat0_error"] = True
+            return "AT3", anat0_error_reply(err)
+    if step == "AT5" and _has(n, *_AT5_DMAQ_WORDS):
+        if not _is_done(n) or is_question(text) or _has(n, "como"):
+            return "AT5", at5_dmaq_answer(data)
+    if step == "AT9":
+        num, where = parse_cdu_where(text)
+        cdu = data.get("cdu") or {}
+        num = num or cdu.get("number")
+        if num and where and (cdu.get("number") != num or not cdu.get("where")
+                              or _CDU_NUM_RE.search(text)):
+            data["cdu"] = {"number": num, "where": where}
+            if where == "dmaq":
+                return "AT9", _at9_branch_a(data, num)
+            return _cdu_finish(data, _at9_branch_b(num), passo_d=False)
+    if step in EVENT_STEPS and data.get("event_other"):
+        return _other_event_note(step, data, text)
+    return None
+
+
 def handle(step, data, text):
-    """(new_step, reply) for a message at an ANATEM step. 'IDLE' = simulation ended."""
+    """(new_step, reply) for a message at an ANATEM step. 'IDLE' = simulation ended.
+    reply None (v6.6.2) = answer through the free chat, step kept (2d / 4b)."""
     text = text or ""
     n = norm(text)
 
@@ -1216,13 +1549,22 @@ def handle(step, data, text):
     if is_back(text):
         if step == "AT1":
             return step, "Este já é o primeiro passo.\n\n" + question(step, data)
-        prev = data.pop("cdu_return", "AT8") if step == "AT9" else _BACK[step]
+        if step == "AT9":
+            prev = data.pop("cdu_return", "AT8")
+        elif step == "AT10B":
+            prev = data.pop("ctrl_return", "AT10")
+        else:
+            prev = _BACK[step]
         return _enter(prev, data, "Voltando um passo.\n\n")
+
+    hit = intercept(step, data, text)
+    if hit is not None:
+        return hit
 
     if step == "AT1":
         base = parse_base(text, data)
         if base is None:
-            return _retry("AT1", data, "Não identifiquei a escolha.")
+            return _unmatched("AT1", data, "Não identifiquei a escolha.", text)
         data["base"] = base
         data.pop("base_suggested", None)
         prefix = f"Base: **{BASE_LABELS[base]}**.\n\n"
@@ -1251,8 +1593,8 @@ def handle(step, data, text):
             return _enter("AT4", data, "ANAT0 concluído.\n\n")
         if r == "error":
             data["anat0_error"] = True
-            return "AT3", _AT3_ERROR
-        return _retry("AT3", data, f"Responda **{T_RAN_OK}** ou **{T_RAN_ERR}**.")
+            return "AT3", at3_error_message()
+        return _unmatched("AT3", data, f"Responda **{T_RAN_OK}** ou **{T_RAN_ERR}**.", text)
 
     if step == "AT4":
         name = parse_filename(text)
@@ -1264,18 +1606,19 @@ def handle(step, data, text):
     if step == "AT5":
         if _is_done(n):
             return _enter("AT6", data, "Arquivo .stb configurado.\n\n")
-        return _retry("AT5", data, f"Quando terminar os três ajustes, responda **{T_CONFIGURED}**.")
+        return _unmatched("AT5", data, f"Quando terminar os três ajustes, responda **{T_CONFIGURED}**.", text)
 
     if step == "AT6":
         if data.get("equip") == "pendente":
             if _is_done(n):
                 data["equip"] = "incluidos"
                 return _enter("AT7", data, "Modelos incluídos no .stb.\n\n")
-            return _retry("AT6", data, f"Quando terminar, responda **{T_MODELS_DONE}**.")
+            return _unmatched("AT6", data, f"Quando terminar, responda **{T_MODELS_DONE}**.", text)
         if data.get("equipment") != "include" and not _has(n, "ja incluidos", "ja estao"):
             choice = parse_equipment_choice(text, data)
             if choice is None:
-                return _retry("AT6", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.")
+                return _unmatched("AT6", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.",
+                                  text)
             data["equipment"] = choice
             if choice == "none":
                 return _enter("AT7", data, f"Equipamentos: **{EQUIPMENT_NONE_TEXT}**.\n\n")
@@ -1290,12 +1633,12 @@ def handle(step, data, text):
         if _has(n, "sim", "incluir", "quero", "s"):
             data["equip"] = "pendente"
             return "AT6", _at6_include(data)
-        return _retry("AT6", data, f"Responda **{T_YES}** ou **{T_ALREADY}**.")
+        return _unmatched("AT6", data, f"Responda **{T_YES}** ou **{T_ALREADY}**.", text)
 
     if step == "AT7":
         if _is_done(n):
             return _enter("AT8", data, "Simulação de verificação preparada.\n\n")
-        return _retry("AT7", data, f"Quando terminar, responda **{T_READY}**.")
+        return _unmatched("AT7", data, f"Quando terminar, responda **{T_READY}**.", text)
 
     if step == "AT8":
         r = parse_ran(text)
@@ -1303,7 +1646,7 @@ def handle(step, data, text):
             return _enter("AT10", data, "Execução sem erros.\n\n")
         if r == "error":
             return _to_cdu(data, "AT8")
-        return _retry("AT8", data, f"Responda **{T_RAN_OK}** ou **{T_RUN_CDU_ERR}**.")
+        return _unmatched("AT8", data, f"Responda **{T_RAN_OK}** ou **{T_RUN_CDU_ERR}**.", text)
 
     if step == "AT9":
         cdu = data.setdefault("cdu", {})
@@ -1316,19 +1659,22 @@ def handle(step, data, text):
         if not cdu.get("where"):
             w = parse_where(text)
             if w is None:
-                return _retry("AT9", data, "Não identifiquei a resposta.")
+                return _unmatched("AT9", data, "Não identifiquei a resposta.", text)
             cdu["where"] = w
             if w == "dmaq":
                 return "AT9", _at9_branch_a(data, cdu["number"])
             return _cdu_finish(data, _at9_branch_b(cdu["number"]), passo_d=False)
         ctrl = parse_ctrl(text)
         if ctrl is None:
-            return _retry("AT9", data, f"Responda **{T_GOV}** ou **{T_AVR}**.")
+            return _unmatched("AT9", data, f"Responda **{T_GOV}**, **{T_AVR}** ou **{T_PSS}**.", text)
         cdu["ctrl"] = ctrl
-        return _cdu_finish(data, _GOV_ADVICE if ctrl == "gov" else _AVR_ADVICE)
+        return _cdu_finish(data, {"gov": _GOV_ADVICE, "avr": _AVR_ADVICE, "pss": _PSS_ADVICE}[ctrl])
 
     if step in ("AT10", "ATS4"):
         return _flat_step(step, data, text)
+
+    if step == "AT10B":
+        return _ctrl_acting_step(data, text)
 
     if step in EVENT_STEPS:
         return _events_step(step, data, text)
@@ -1338,7 +1684,8 @@ def handle(step, data, text):
             if is_files_continue(text):
                 data["ats2_files"] = "yes"
                 return "ATS2", question("ATS2", data)
-            return _retry("ATS2", data, f"Quando tiver os dois arquivos, clique em **{T_FILES_CONTINUE}**.")
+            return _unmatched("ATS2", data,
+                              f"Quando tiver os dois arquivos, clique em **{T_FILES_CONTINUE}**.", text)
         if ats2_files_question(data) and not parse_sav(text):
             has = parse_has_files(text)
             if has == "no":
@@ -1348,7 +1695,7 @@ def handle(step, data, text):
             if has == "yes":
                 data["ats2_files"] = "yes"
                 return "ATS2", question("ATS2", data)
-            return _retry("ATS2", data, f"Responda **{T_HAS_FILES}** ou **{T_NO_FILES}**.")
+            return _unmatched("ATS2", data, f"Responda **{T_HAS_FILES}** ou **{T_NO_FILES}**.", text)
         data["ats2_files"] = "yes"   # the .sav typed straight away also answers 'yes'
         sav = parse_sav(text)
         rest = text.replace(sav, " ") if sav else text
@@ -1378,7 +1725,8 @@ def handle(step, data, text):
         if data.get("equipment") != "include":
             choice = parse_equipment_choice(text, data)
             if choice is None:
-                return _retry("ATS3", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.")
+                return _unmatched("ATS3", data, f"Responda **{T_CONVENTIONAL}** ou **{T_INCLUDE_EQUIP_LABEL}**.",
+                                  text)
             data["equipment"] = choice
             if choice == "none":
                 return _enter("ATS4", data, f"Equipamentos: **{EQUIPMENT_NONE_TEXT}**.\n\n")
@@ -1389,6 +1737,6 @@ def handle(step, data, text):
         if _is_done(n) or _has(n, "confirmo", "inclusao"):
             data["equip"] = "incluidos"
             return _enter("ATS4", data, "Modelos incluídos no .stb.\n\n")
-        return _retry("ATS3", data, f"Quando terminar, clique em **{T_CONFIRM_MODELS}**.")
+        return _unmatched("ATS3", data, f"Quando terminar, clique em **{T_CONFIRM_MODELS}**.", text)
 
     return step, question(step, data)

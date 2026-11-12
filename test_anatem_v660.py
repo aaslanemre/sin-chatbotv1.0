@@ -239,9 +239,9 @@ section("3. ANAT0 error branch")
 at_state("AT3", {"base": "ONS", "sav_name": "x.sav", "case_number": "1"})
 click(AT.T_RAN_ERR)
 err = reply()
-check("'Deu erro' → troubleshooting, stays at AT3",
+check("'Deu erro' → troubleshooting, stays at AT3",   # v6.6.2 (3a): Thomas's procedure; why in Detalhes
       step() == "AT3" and "violação de limite de potência ativa ou reativa" in err
-      and "salve o **.sav** novamente" in err.replace("Salve", "salve") and "Rodou sem erros" not in err[:20])
+      and "Salve o **.SAV**" in err and "Rodou sem erros" not in err[:20])
 check("troubleshooting asks again 'rodou sem erros?' with the same buttons",
       "rodou sem erros?" in err.lower() and {e[4][0][0] for e in option_buttons()} == {AT.T_RAN_OK, AT.T_RAN_ERR})
 click(AT.T_RAN_OK)
@@ -311,8 +311,10 @@ click(AT.T_SMALL_OSC)
 check("≤ 0.001 pu → numerical precision, AT11", step() == "AT11" and "precisão numérica" in reply())
 at_state("AT10", AT9)
 click(AT.T_VARYING); click(AT.T_LARGE_OSC)
-check("larger → not numerical, AT9 path (CDU number asked)", step() == "AT9" and "não** é efeito numérico" in reply()
-      and data().get("cdu_return") == "AT8")
+# v6.6.2 (3d): larger → AT10B (controles atuando) first; "Não há controle atuando" → AT9
+click(AT.T_NO_CTRL)
+check("larger → not numerical, AT9 path (CDU number asked)", step() == "AT9" and "não são efeito numérico" in
+      "\n".join(m["content"] for m in assistants()[-2:]) and data().get("cdu_return") == "AT8")
 run("CDU 77"); click(AT.T_NOT_DMAQ)
 check("…then back at AT8", step() == "AT8")
 
@@ -708,7 +710,7 @@ check("glossary: the 13 ANATEM terms + v6.6.1 DARQ/ULOG and DEVT event codes, pe
                                "ABCI", "RMGR", "MDLP", "MDLQ"} and set(GLOSSARY_ANATEM) <= set(ALL_TERMS))
 check("glossary matching: ANAT0, DMAQ and '.stb' found in a step message",
       {"ANAT0", "DMAQ", "STB"} <= set(find_terms(AT.question("AT3", {}) + " " + AT.question("AT5", {}))))
-check("APP_VERSION v6.6.1, v6.6.0 DRAFT PT-BR notes kept", APP_VERSION == "v6.6.1"
+check("APP_VERSION v6.6.2, v6.6.0 DRAFT PT-BR notes kept", APP_VERSION == "v6.6.2"
       and "DRAFT" in RELEASE_NOTES["v6.6.0"]["status"] and len(RELEASE_NOTES["v6.6.0"]["o_que_testar"]) == 5)
 start()
 check("welcome message mentions the ANATEM, the rest kept",

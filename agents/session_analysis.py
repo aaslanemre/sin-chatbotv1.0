@@ -23,11 +23,11 @@ TERMINAL_STEPS = {"STEP12", "NET7_RESULTS", "AT11", "ATS5"}
 # v6.6.0 ANATEM guide (sim_type "ANATEM"), in flow order. Main path, then the
 # small-case path (option 3 at AT1). No step is exempt from the not-advancing rule.
 ANATEM_STEP_ORDER = ("AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT10",
-                     "AT11", "ATS2", "ATS3", "ATS4", "ATS5")
+                     "AT10B", "AT11", "ATS2", "ATS3", "ATS4", "ATS5")
 ANATEM_STEP_SHORT = {
     "AT1": "base", "AT2": "caso", "AT3": "ANAT0", "AT4": "DMAQ", "AT5": ".stb",
     "AT6": "equipamentos", "AT7": "verificação", "AT8": "execução", "AT9": "CDU",
-    "AT10": "PLOTCEPEL", "AT11": "eventos", "ATS2": ".stb/DMAQ", "ATS3": "equipamentos",
+    "AT10": "PLOTCEPEL", "AT10B": "controles atuando", "AT11": "eventos", "ATS2": ".stb/DMAQ", "ATS3": "equipamentos",
     "ATS4": "flat run", "ATS5": "eventos",
 }
 

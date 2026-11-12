@@ -338,20 +338,27 @@ def anatem_controls(step, data):
             return [_form("at_cdu", "CDU com erro", [F_AT_CDU])]
         if not cdu.get("where"):
             return [_buttons(_opt(AT.T_IN_DMAQ), _opt(AT.T_NOT_DMAQ))]
-        return [_buttons(_opt(AT.T_GOV), _opt(AT.T_AVR))]
+        return [_buttons(_opt(AT.T_GOV), _opt(AT.T_AVR), _opt(AT.T_PSS))]
     if step in ("AT10", "ATS4"):
         if data.get("osc_pending"):
             return [_buttons(_opt(AT.T_SMALL_OSC), _opt(AT.T_LARGE_OSC))]
         if step == "AT10":
             return [_buttons(_opt(AT.T_FLAT), _opt(AT.T_VARYING))]
         return [_buttons(_opt(AT.T_FLAT_LINE), _opt(AT.T_VARYING), _opt(AT.T_ERROR))]
+    if step == "AT10B":
+        return [_buttons(_opt(AT.T_CTRL_ADJUSTED), _opt(AT.T_NO_CTRL))]
     if step in AT.EVENT_STEPS:
+        if data.get("event_other"):   # v6.6.2: the user types what to analyse
+            return []
+        if data.get("event_pending") == AT.OTHER_EVENT:
+            return [_buttons(_opt(AT.T_EVENT_DONE), _opt(AT.T_ADD_EVENT), _opt(AT.T_END))]
         if data.get("event_pending"):
             return [_buttons(_opt(AT.T_EVENT_DONE))]
         if data.get("events") and not data.get("event_menu"):
             return [_buttons(_opt(AT.T_ADD_EVENT), _opt(AT.T_END))]
+        n = len(AT.EVENT_LABELS)
         return [_buttons(*[_opt(f"{i} — {label}", label) for i, label in enumerate(AT.EVENT_LABELS, 1)],
-                         _opt(AT.T_END))]
+                         _opt(f"{n + 1} — {AT.T_OTHER_EVENT}", AT.T_OTHER_EVENT), _opt(AT.T_END))]
     if step == "ATS2":
         if AT.ats2_files_question(data):
             return [_buttons(_opt(AT.T_HAS_FILES), _opt(AT.T_NO_FILES))]

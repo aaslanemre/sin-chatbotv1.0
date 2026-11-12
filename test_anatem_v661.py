@@ -194,8 +194,8 @@ check("the guidance says the guide cannot create the .STB and where to get one",
 check("panel shows the 'no own files' flag",
       "Arquivos .SAV/.STB: **sem arquivos próprios (orientação do caso de exemplo)**" in panel())
 run("rede.sav, caso 1, barras 10")
-check("guidance does NOT advance on other input (no .sav stored, same step)",
-      step() == "ATS2" and "sav_name" not in data() and AT.T_FILES_CONTINUE in reply())
+check("guidance does NOT advance on other input (no .sav stored, same step)",   # v6.6.2 (2d): 4+ words → free chat
+      step() == "ATS2" and "sav_name" not in data() and "↩️ Quando terminar" in reply())
 click(AT.T_FILES_CONTINUE)
 check("[continuar] → the normal ATS2 questions (.sav, case, generator buses) with the form",
       step() == "ATS2" and "Informe o nome do arquivo **.sav**" in reply() and "ats_case" in forms())
@@ -315,13 +315,15 @@ check("'voltar' from AT7 asks the equipment question again from the start",
 # ═════════════════════════════════════════════════════════════════════════════
 section("3. P3 — DARQ, not ULOG")
 # ═════════════════════════════════════════════════════════════════════════════
+# v6.6.2 (3b): DARQ explained by columns (Thomas's text) replaces the v6.6.1 Word wording.
 WORD_ACTIONS = [
-    "No cartão DARQ, localize a declaração de arquivo associada à rede de fluxo de potência e atualize "
-    "para o nome do seu arquivo .SAV convergido",
-    "Na linha de leitura do .SAV, confirme se o número do caso especificado corresponde exatamente ao "
-    "número do caso convergido no ANAREDE e processado no ANAT0",
-    "No cartão DARQ, substitua a referência do arquivo DMAQ original pelo caminho do novo arquivo gerado "
-    "pelo ANAT0",
+    "no cartão DARQ, identifique a linha cujo tipo de arquivo (primeira coluna) é SAV. A segunda coluna "
+    "é o número do caso e a terceira é o nome do arquivo com o caminho. Altere a terceira coluna para o "
+    "seu arquivo .SAV",
+    "na mesma linha, altere a segunda coluna para o número do caso convergido no ANAREDE e processado "
+    "no ANAT0",
+    "no cartão DARQ, na linha cujo tipo de arquivo (primeira coluna) é DAT e que aponta para o DMAQ "
+    "original da base, troque o caminho pelo do novo arquivo gerado pelo ANAT0",
 ]
 
 
@@ -361,8 +363,8 @@ check("AT5: the three DARQ actions with the Word-file wording, in order (with an
       t_at5_word(), AT.question("AT5", AT5D))
 ats2 = strip_md(AT._ats2_done(dict(SMALL)))
 check("ATS2 (small case): the same DARQ wording for the .SAV and the case number, no ULOG, no ANAT0",
-      WORD_ACTIONS[0] in ats2 and "Na linha de leitura do .SAV, confirme se o número do caso especificado "
-      "corresponde exatamente ao número do caso convergido no ANAREDE" in ats2
+      WORD_ACTIONS[0] in ats2 and "na mesma linha, altere a segunda coluna para o número do caso "
+      "convergido no ANAREDE (1)" in ats2
       and "ULOG" not in ats2 and "ANAT0" not in ats2, ats2)
 codes = AT._entry("AT5", dict(AT5D))
 check("AT5 'Detalhes' lists ULOG and DARQ as separate entries (Word-file wording)",
@@ -382,7 +384,7 @@ check("AT4 example is neutral (dmaq_anat0 + the user's extension), form placehol
       "dmaq_anat0.dma" not in at4 and "`dmaq_anat0`" in at4 and "extensão que você escolheu" in at4
       and SI.F_AT_DMAQ["placeholder"] == "ex: dmaq_anat0")
 check("instructions say 'arquivo DMAQ gerado pelo ANAT0'; '.DMA/.DAT' only in the DARQ definition",
-      "arquivo DMAQ original pelo caminho do novo arquivo gerado pelo ANAT0" in strip_md(AT.question("AT5", {}))
+      "troque o caminho pelo do novo arquivo gerado pelo ANAT0" in strip_md(AT.question("AT5", {}))
       and [t for t in set(all_texts()) if ".DMA/.DAT" in t and AT.STB_CODES not in t
            and t != GLOSSARY_ANATEM["DARQ"]] == [])
 check("DMAQ.STB kept only as the ANAT0 input file at AT3 (BNT1.DAT, BNT2.DAT, DMAQ.STB)",
@@ -428,7 +430,7 @@ check("entering AT11: the four event types with descriptions and codes, plus the
       all(l in menu for l in AT.EVENT_LABELS) and "(códigos: APCB, APCC, APCL)" in menu
       and "(código: ABCI)" in menu and "(código: RMGR)" in menu and "(códigos: MDLP e MDLQ)" in menu
       and AT.EVENT_CODES_NOTE in menu)
-check("menu buttons: 1–4 + Encerrar", option_texts() == AT.EVENT_LABELS + [AT.T_END]
+check("menu buttons: 1–4 + Encerrar", option_texts() == AT.EVENT_LABELS + [AT.T_OTHER_EVENT, AT.T_END]
       and [e[1] for e in option_buttons()][:4] == [f"{i} — {l}" for i, l in enumerate(AT.EVENT_LABELS, 1)])
 
 
@@ -442,7 +444,7 @@ def reach(how):
             run({"number": str(i), "name": ["curto-circuito", "perda de linha", "desligamento de unidade geradora",
                                             "rejeição de carga"][i - 1]}[how])
         if not (data().get("event_pending") == label and option_texts() == [AT.T_EVENT_DONE]
-                and f"**{label}.**" in reply()):
+                and f"**{label}** — " in reply()):
             bad.append((how, label))
     return bad
 
@@ -465,7 +467,7 @@ check("reminder: when it starts, where, when it ends; DEVT + F5; no DEVT line ge
 click(AT.T_EVENT_DONE)
 c1 = data().get("events") == [{"type": "Curto-circuito", "note": ""}]
 click(AT.T_ADD_EVENT)
-c2 = option_texts() == AT.EVENT_LABELS + [AT.T_END]
+c2 = option_texts() == AT.EVENT_LABELS + [AT.T_OTHER_EVENT, AT.T_END]
 run("4"); run("barra 500, 30% em t = 2 s")
 c3 = data()["events"][-1] == {"type": "Rejeição de carga", "note": "barra 500, 30% em t = 2 s"}
 check("events stored as dicts {type, note} ('Evento inserido' → note '', a description → note)", c1 and c2 and c3,
@@ -503,8 +505,8 @@ check("no code block in any guide message", not any("```" in t for t in all_text
 # ═════════════════════════════════════════════════════════════════════════════
 section("6. Version, markers")
 # ═════════════════════════════════════════════════════════════════════════════
-check("APP_VERSION v6.6.1 with DRAFT PT-BR notes (5 novidades, 5 o que testar)",
-      APP_VERSION == "v6.6.1" and "DRAFT" in RELEASE_NOTES["v6.6.1"]["status"]
+check("APP_VERSION v6.6.2; v6.6.1 DRAFT PT-BR notes kept (5 novidades, 5 o que testar)",
+      APP_VERSION == "v6.6.2" and "DRAFT" in RELEASE_NOTES["v6.6.1"]["status"]
       and len(RELEASE_NOTES["v6.6.1"]["novidades"]) == 5 and len(RELEASE_NOTES["v6.6.1"]["o_que_testar"]) == 5)
 src = open("agents/anatem_flow.py", encoding="utf-8").read()
 check("new text blocks marked PENDING REVIEW (≥ 30 markers in anatem_flow.py)",
@@ -520,7 +522,7 @@ for name in ("STB_CODES", "_EQUIP_BRANCH_Q", "EVENT_TYPES", "ATS2_EXAMPLE_GUIDE"
 section("7. The tests are not trivial: ULOG/DARQ back, F5 removed, conventional broken")
 # ═════════════════════════════════════════════════════════════════════════════
 saved = (AT._at5_main, AT._AT8_MAIN, AT.parse_equipment_choice)
-AT._at5_main = lambda d: saved[0](d).replace("No cartão **DARQ**, localize", "No bloco **ULOG/DARQ**, localize")
+AT._at5_main = lambda d: saved[0](d).replace("no cartão **DARQ**, identifique", "no bloco **ULOG/DARQ**, identifique")
 check("re-introduced 'ULOG/DARQ' in AT5 → the P3 tests FAIL",
       not t_no_ulog_darq() and not t_at5_word() and t_same_sentence())
 AT._at5_main = saved[0]

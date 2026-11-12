@@ -24,6 +24,7 @@ from agents import grounding as _grounding
 from agents import ux as _ux
 from agents import structured_input as _si
 from agents import anatem_flow as _at
+from agents import anatem_guard as _ag
 from config.glossary import ALL_TERMS as GLOSSARY, GLOSSARY_STATUS, find_terms as _glossary_terms
 try:
     from config.settings import GROUNDING_THRESHOLD, GROUNDING_THRESHOLD_LOW
@@ -2692,7 +2693,7 @@ def _handle_anatem_state(user_text: str) -> str:
         _close_simulation()
     else:
         st.session_state.sim_step = new_step
-    return reply
+    return reply   # None (v6.6.2): free chat at the same step (unmatched 4+ words / 'Outro')
 
 
 def _route_idle_program(user_text: str):
@@ -2747,6 +2748,20 @@ def _handle_sim_state(user_text: str) -> str | None:
                 "Se precisar retomar ou tiver dúvidas sobre o SIN, é só perguntar."
             )
         return None  # Let LLM handle while paused
+
+    # v6.6.2: ANATEM answers that must win over the '?' routing below (pasted ANAT0
+    # error, DMAQ path question, 'CDU … não está no DMAQ', fault times, 'Outro' event)
+    if step in _at.ALL_STEPS:
+        hit = _at.intercept(step, data, user_text)
+        if hit is not None:
+            new_step, reply = hit
+            if new_step == "IDLE":
+                _close_simulation()
+            else:
+                st.session_state.sim_step = new_step
+            if reply is not None:
+                return reply
+            return None
 
     # If mid-simulation and user asked a free question, let LLM handle it
     # (simulation state is preserved; ↩️ reminder appended by the LLM branch)
@@ -4673,7 +4688,12 @@ def _write_stream(chunks) -> None:
         slot.markdown(acc + "▌")
 
 
-def _answer_with_llm(question, study_context, sim_context_note):
+def _anatem_filtered(raw, anatem_ctx):
+    """v6.6.2: ANATEM context → no fenced blocks / card-record lines in the LLM answer."""
+    return _ag.filter_answer(raw)[0] if anatem_ctx else raw
+
+
+def _answer_with_llm(question, study_context, sim_context_note, anatem_ctx=False):
     """
     Retrieve once, show the grounding badge (and red disclosure), stream the answer,
     then replace the streamed text with the final stored text so that what is shown
@@ -4681,6 +4701,8 @@ def _answer_with_llm(question, study_context, sim_context_note):
 
     answer is None when, with no simulation active, the LLM opened with the
     guided-flow intro: the text is discarded and the caller starts the real flow.
+
+    anatem_ctx (v6.6.2): the ANATEM code filter runs on the stream and on the stored text.
     """
     chain = st.session_state.chain
     inputs = {"question": question, "study_context": study_context}
@@ -4704,7 +4726,7 @@ def _answer_with_llm(question, study_context, sim_context_note):
         ginfo = None
         if retrieval_scores is not None and _grounding_applies(question, raw):
             ginfo = _grounding_for(retrieval_scores)
-        answer = _ux.clean_llm_answer(raw, keep_guide) + sim_context_note
+        answer = _anatem_filtered(_ux.clean_llm_answer(raw, keep_guide), anatem_ctx) + sim_context_note
         if ginfo and ginfo["grounding_level"] == "red":
             answer = f"{_grounding.DISCLOSURE}\n\n{_step_not_covered_note()}{answer}"
         if ginfo:
@@ -4743,7 +4765,8 @@ def _answer_with_llm(question, study_context, sim_context_note):
             with body_slot.container():
                 if disclosure:
                     st.markdown(disclosure)
-                _write_stream(_ux.filter_guide_stream(_tee(chain.stream(inputs, retrieved)), keep_guide))
+                _shown = _ux.filter_guide_stream(_tee(chain.stream(inputs, retrieved)), keep_guide)
+                _write_stream(_ag.filter_stream(_shown) if anatem_ctx else _shown)
             raw = "".join(raw_parts)
         except Exception:
             raw = None
@@ -4767,7 +4790,8 @@ def _answer_with_llm(question, study_context, sim_context_note):
         if ginfo and not _grounding_applies(question, raw):  # meta reply / PWF output
             ginfo, disclosure = None, ""
             badge_slot.empty()
-        answer = disclosure + _ux.clean_llm_answer(raw, keep_guide) + sim_context_note
+        answer = (disclosure + _anatem_filtered(_ux.clean_llm_answer(raw, keep_guide), anatem_ctx)
+                  + sim_context_note)
         body_slot.markdown(answer)
 
     if ginfo:
@@ -4941,6 +4965,14 @@ def _process_input(prompt: str, source: str = "typed"):
                 study_context = f"{study_context}\n\n{_step_ctx}"
             if _expert():
                 study_context = f"{study_context}\n\n{_EXPERT_NOTE}"
+            # v6.6.2: ANATEM free answers — words only, no card syntax (rule in study_context;
+            # prompts/system_prompt.py is unchanged) + the 'Outro' event instruction.
+            _anatem_ctx = _ag.is_anatem_context(prompt, (st.session_state.sim_data or {}).get("sim_type"))
+            if _anatem_ctx:
+                study_context = f"{study_context}\n\n{_ag.RULE}"
+            _extra_rule, _extra_tail = _at.llm_extras(st.session_state.sim_data)
+            if _extra_rule:
+                study_context = f"{study_context}\n\n{_extra_rule}"
             full_prompt = prompt
             # If user just declined IDLE_LT_CONFIRM, answer their original question
             _lt_q = st.session_state.get("_lt_confirm_question")
@@ -4957,9 +4989,11 @@ def _process_input(prompt: str, source: str = "typed"):
                     f"\n\n---\n↩️ Quando terminar, responda sobre **{nudge}** "
                     "para continuar a simulação."
                 )
+            if _extra_tail:
+                sim_context_note = _extra_tail
 
             answer, sources, _grounding_info = _answer_with_llm(
-                full_prompt, study_context, sim_context_note)
+                full_prompt, study_context, sim_context_note, _anatem_ctx)
             if answer is None:
                 # The LLM imitated the guided-flow intro: start the real flow instead.
                 _flow = (_start_anatem_flow() if _at.names_anatem(prompt) and not _at.names_anarede(prompt)

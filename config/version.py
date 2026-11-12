@@ -1,9 +1,34 @@
 # Single source of truth for the app version (user sidebar, admin sidebar, feedback rows).
-APP_VERSION = "v6.6.1"
+APP_VERSION = "v6.6.2"
 
 # "Novidades da versão" banner shown once per version per user (users.last_seen_version).
 # PT-BR, user-facing. Entries marked DRAFT must be reviewed before deploy.
 RELEASE_NOTES = {
+    "v6.6.2": {
+        "status": "DRAFT — review before deploy",
+        "novidades": [
+            "Erros do ANAT0: orientação passo a passo (relatório da Etapa 1, Ctrl+F “Erro”). Se "
+            "você colar o trecho do erro, o guia lê o código e a barra; para o erro ANAT01-190 "
+            "(potência gerada abaixo do mínimo) ele indica a correção.",
+            "Passo 5 (edição do .stb): o cartão DARQ é explicado por colunas (tipo de arquivo, "
+            "número do caso, arquivo com o caminho), inclusive a linha DAT do DMAQ.",
+            "Passo do CDU: três botões — regulador de velocidade (GOV), regulador de tensão (AVR) "
+            "e estabilizador (PSS).",
+            "Oscilação maior que 0,001 pu: novo passo para verificar controles atuando antes de "
+            "ir para o CDU.",
+            "Eventos (DEVT): cada evento mostra o nome do cartão e o link do manual do ANATEM; "
+            "nova opção “Outro / descrever o que quero analisar”.",
+            "Perguntas livres sobre o ANATEM: a resposta explica em palavras, sem exemplos de "
+            "código ou de linhas de cartões.",
+        ],
+        "o_que_testar": [
+            "No passo 3, clique em “Deu erro” e depois cole um erro ANAT01-190 do relatório.",
+            "No passo 5, digite uma pergunta sobre o caminho do arquivo DMAQ.",
+            "No passo 10, escolha “Variando” e depois “Oscilação maior”.",
+            "Nos eventos, escolha “Outro / descrever o que quero analisar”.",
+            "Pergunte livremente pela sintaxe de um cartão do ANATEM (ex: DARQ ou ABCI).",
+        ],
+    },
     "v6.6.1": {
         "status": "DRAFT — review before deploy",
         "novidades": [
