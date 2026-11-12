@@ -91,6 +91,17 @@ GLOSSARY_ANATEM = {
             "junto com MDLQ. Sintaxe e colunas: conferir na documentação do ANATEM.",
     "MDLQ": "Código de evento do bloco DEVT usado na rejeição de carga (desconexão de demanda), "
             "junto com MDLP. Sintaxe e colunas: conferir na documentação do ANATEM.",
+    # v6.6.3 — fault clearing times (ONS Procedimentos de Rede, Submódulo 2.3, Tabela 2).
+    # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+    "Tempo de eliminação de defeito": "Tempo entre o início de um curto-circuito e a sua eliminação: "
+                                      "tempo de atuação da proteção mais o tempo de abertura dos "
+                                      "disjuntores. O Submódulo 2.3 do ONS (Tabela 2) traz valores "
+                                      "indicativos por nível de tensão.",
+    "Falha de disjuntor": "Situação em que um disjuntor não abre quando a proteção comanda; o defeito é "
+                          "então eliminado por disjuntores de retaguarda, com tempo de eliminação maior.",
+    "Teleproteção": "Esquema de comunicação entre os terminais de uma linha que permite à proteção "
+                    "atuar rapidamente para defeitos em toda a extensão da linha, reduzindo o tempo "
+                    "de eliminação.",
 }
 
 # Everything the app shows (📖 Glossário, inline help) and matches in messages.
@@ -98,7 +109,8 @@ ALL_TERMS = {**GLOSSARY, **GLOSSARY_ANATEM}
 
 # Case-sensitive acronyms; the rest match case-insensitively.
 # "STB" also matches the file extension (.stb).
-_CI_TERMS = {"Referência", "hachura", "flat run", "STB"}
+_CI_TERMS = {"Referência", "hachura", "flat run", "STB",
+             "Tempo de eliminação de defeito", "Falha de disjuntor", "Teleproteção"}   # v6.6.3
 
 
 def _pattern(term):

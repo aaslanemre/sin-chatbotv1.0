@@ -178,7 +178,7 @@ def t_no_files():
     click(AT.T_NO_FILES)
     guide = reply()
     ok = (step() == "ATS2" and "9BARRAS.PWF" in guide and "9_barras.lst" in guide
-          and "Arquivo > Salvar Caso Histórico" in guide and data().get("small_case_no_files") is True
+          and "Histórico > Operações > Salvar" in guide and data().get("small_case_no_files") is True
           and option_texts() == [AT.T_FILES_CONTINUE])
     # a .stb FILE NAME (anything.stb) is never invented — only the extension is named
     no_stb_name = not re.search(r"[\w-]+\.stb\b", guide, re.I)
@@ -186,7 +186,7 @@ def t_no_files():
 
 
 ok, no_stb_name, guide = t_no_files()
-check("'Não tenho' → example-case guidance (9BARRAS.PWF, .LST, Arquivo > Salvar Caso Histórico), "
+check("'Não tenho' → example-case guidance (9BARRAS.PWF, .LST, Histórico > Operações > Salvar), "
       "flag small_case_no_files, only the [continuar] button", ok, guide)
 check("the guidance never invents a .STB file name or path", no_stb_name, guide)
 check("the guidance says the guide cannot create the .STB and where to get one",
@@ -443,7 +443,10 @@ def reach(how):
         else:
             run({"number": str(i), "name": ["curto-circuito", "perda de linha", "desligamento de unidade geradora",
                                             "rejeição de carga"][i - 1]}[how])
-        if not (data().get("event_pending") == label and option_texts() == [AT.T_EVENT_DONE]
+        # v6.6.3: a short circuit first asks the voltage, a line loss the prior fault
+        first = {"Curto-circuito": [str(kv) for kv in AT.TABLE_KV] + [AT.T_KV_OTHER],
+                 "Perda de linha de transmissão": [AT.T_NO_PRIOR_FAULT, AT.T_SLG_FAULT]}.get(label, [AT.T_EVENT_DONE])
+        if not (data().get("event_pending") == label and option_texts() == first
                 and f"**{label}** — " in reply()):
             bad.append((how, label))
     return bad
@@ -461,11 +464,14 @@ check("unknown type → re-asks, nothing stored", step() == "AT11" and not data(
 at_state("AT11", AT5D)
 click("Curto-circuito")
 rem = reply()
+click("500")   # v6.6.3: voltage first, then the rest of the reminder
+rem += reply()
 check("reminder: when it starts, where, when it ends; DEVT + F5; no DEVT line generated",
       "quando** ele começa" in rem and "quando** termina" in rem and "onde** é o defeito" in rem
       and "F5" in rem and "```" not in rem)
 click(AT.T_EVENT_DONE)
-c1 = data().get("events") == [{"type": "Curto-circuito", "note": ""}]
+c1 = data().get("events") == [{"type": "Curto-circuito", "note": "", "kv": 500, "t_sem_falha_ms": 100,
+                               "t_com_falha_ms": 250}]
 click(AT.T_ADD_EVENT)
 c2 = option_texts() == AT.EVENT_LABELS + [AT.T_OTHER_EVENT, AT.T_END]
 run("4"); run("barra 500, 30% em t = 2 s")
@@ -474,14 +480,15 @@ check("events stored as dicts {type, note} ('Evento inserido' → note '', a des
       data().get("events"))
 check("panel counts the events", "Eventos: **2**" in panel())
 click(AT.T_END)
+click(AT.T_CRIT_SKIP)   # v6.6.3: AT12
 summary = reply()
 check("closing summary lists the events by type",
-      step() == "IDLE" and "  - Curto-circuito\n" in summary
+      step() == "IDLE" and "  - Curto-circuito · 500 kV · 100/250 ms (Tabela 2)\n" in summary
       and "  - Rejeição de carga — barra 500, 30% em t = 2 s" in summary, summary)
 
 at_state("AT11", dict(AT5D, events=["curto antigo v6.6.0"]))
 check("v6.6.0 string events: panel renders", "Eventos: **1**" in panel())
-run("encerrar")
+run("encerrar"); run("pular verificação")   # v6.6.3: AT12
 check("…and the summary renders them", "  - curto antigo v6.6.0" in reply())
 mixed = AT.closing_summary({"events": ["antigo", {"type": "Curto-circuito", "note": "x"}]})
 check("mixed old/new events render as text", "  - antigo" in mixed and "  - Curto-circuito — x" in mixed)
@@ -505,8 +512,8 @@ check("no code block in any guide message", not any("```" in t for t in all_text
 # ═════════════════════════════════════════════════════════════════════════════
 section("6. Version, markers")
 # ═════════════════════════════════════════════════════════════════════════════
-check("APP_VERSION v6.6.2; v6.6.1 DRAFT PT-BR notes kept (5 novidades, 5 o que testar)",
-      APP_VERSION == "v6.6.2" and "DRAFT" in RELEASE_NOTES["v6.6.1"]["status"]
+check("APP_VERSION v6.6.3; v6.6.1 DRAFT PT-BR notes kept (5 novidades, 5 o que testar)",
+      APP_VERSION == "v6.6.3" and "DRAFT" in RELEASE_NOTES["v6.6.1"]["status"]
       and len(RELEASE_NOTES["v6.6.1"]["novidades"]) == 5 and len(RELEASE_NOTES["v6.6.1"]["o_que_testar"]) == 5)
 src = open("agents/anatem_flow.py", encoding="utf-8").read()
 check("new text blocks marked PENDING REVIEW (≥ 30 markers in anatem_flow.py)",

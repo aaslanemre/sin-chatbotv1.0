@@ -38,10 +38,13 @@ THOMAS_AT5 = ("O arquivo DMAQ_.DAT foi salvo na pasta ANAT0, eu identifiquei a l
               "arquivo dmaq_")
 THOMAS_AT9 = ("Durante a simulação no ANATEM, ocorreu um erro de inicialização no CDU 1042. No entanto, "
               "não encontrei esse CDU no arquivo DMAQ...")
-FIX_190 = ("Erro **ANAT01-190** na barra **524 (BARIR2UH)**: a potência gerada (**13.0 MW**) está abaixo "
-           "do mínimo das máquinas (**15.0 MW**). Como 15.0 > 13.0: no ANAREDE, aumente a geração da barra "
-           "524 para pelo menos **15.0 MW** (ou ajuste o despacho das máquinas), rode o fluxo de potência, "
-           "confira se convergiu, salve o .SAV e execute o ANAT0 novamente.")
+# v6.6.3: description quoted back, 'geração ativa', and the tail with the confirmed save path
+FIX_190 = ("Erro **ANAT01-190** na barra **524 (BARIR2UH)**.\n\nDescrição lida:\n"
+           "> Potencia gerada (13.0 MW) inferior ao minimo (15.0 MW).\n\n"
+           "A potência gerada (**13.0 MW**) está abaixo do mínimo das máquinas (**15.0 MW**). No ANAREDE, "
+           "aumente a geração ativa da barra 524 para pelo menos **15.0 MW** (ou ajuste o despacho das "
+           "máquinas).\n\nDepois: rode o fluxo de potência, confira se convergiu, salve o .SAV "
+           "(**Histórico > Operações > Salvar**) e execute o ANAT0 novamente.")
 UNMATCHED_LONG = "Onde fica essa janela de mensagens no programa"   # 8 words, matches no answer
 
 # Shaped like the bad free answers of 11–12 Nov (invented card syntax).
@@ -149,18 +152,20 @@ at_state("AT3", AT5D)
 run("Potência gerada (13,0 MW) inferior ao mínimo (15,0 MW).\n*** ERRO - ANAT01-190 ***")
 r = reply()
 check("accents + decimal comma accepted; without the '(Nb' header → no bus shown",
-      r.startswith("Erro **ANAT01-190**: a potência gerada (**13,0 MW**)") and "na barra **" not in r
-      and "aumente a geração da barra indicada no erro para pelo menos **15,0 MW**" in r, r)
+      r.startswith("Erro **ANAT01-190**.") and "A potência gerada (**13,0 MW**)" in r and "na barra **" not in r
+      and "aumente a geração ativa da barra indicada no erro para pelo menos **15,0 MW**" in r, r)
 at_state("AT3", AT5D)
 run("*** ERRO - ANAT01-999 ***")
 r = reply()
-check("unknown code ANAT01-999 → code + generic procedure only (no invented meaning)",
-      r == f"Erro **ANAT01-999**.\n\n**Como corrigir:**\n{AT._AT3_FIX_STEPS}\n\n**O ANAT0 rodou sem erros?**"
+check("unknown code ANAT01-999, no description → code + 'Não reconheci' + generic procedure (no invented meaning)",
+      r == (f"Erro **ANAT01-999**.\n\nNão encontrei a descrição do erro no trecho colado.\n\n"
+            f"Não reconheci o tipo desse erro.\n\n**Como corrigir:**\n{AT._AT3_FIX_STEPS}\n\n{AT._ANAT0_TAIL}"
+            "\n\n**O ANAT0 rodou sem erros?**")
       and step() == "AT3", r)
 run(THOMAS_PASTE.replace("ANAT01-190", "ANAT01-123"))
-check("other code with a parsed record → 'na barra 524 (BARIR2UH)' + generic procedure, no 190 fix",
-      reply().startswith("Erro **ANAT01-123** na barra **524 (BARIR2UH)**.\n\n**Como corrigir:**")
-      and "abaixo do mínimo" not in reply())
+check("v6.6.3: other code, same description → read by the description (code is only a label)",
+      reply().startswith("Erro **ANAT01-123** na barra **524 (BARIR2UH)**.")
+      and "pelo menos **15.0 MW**" in reply())
 at_state("AT3", AT5D)
 run("deu erro de novo")
 check("an error report WITHOUT '*** ERRO - ANAT01-' still gets the 'Deu erro' text", reply().startswith("**Erro no ANAT0.**"))
@@ -462,10 +467,14 @@ EXPECTED_HEAD = {"Curto-circuito": "**Curto-circuito** — cartões do DEVT: **A
                  "Desligamento de unidade geradora": "**Desligamento de unidade geradora** — cartão do DEVT: **RMGR**",
                  "Rejeição de carga": "**Rejeição de carga** — cartões do DEVT: **MDLP, MDLQ**"}
 bad = []
+FIRST_ANSWER = {"Curto-circuito": "500", "Perda de linha de transmissão": AT.T_NO_PRIOR_FAULT}   # v6.6.3
 for label, head in EXPECTED_HEAD.items():
     at_state("AT11", AT5D)
     click(label)
     r = reply()
+    if label in FIRST_ANSWER:
+        click(FIRST_ANSWER[label])
+        r += "\n" + reply()
     if not (r.startswith(head + "\n") and AG.MANUAL_URL in r and "```" not in r and "Para esse evento, defina:" in r):
         bad.append((label, r[:90]))
 check("4a: card name(s) on the first line + 'defina' reminder + manual link, per event", not bad, bad)
@@ -491,6 +500,7 @@ click(AT.T_ADD_EVENT); click(AT.T_OTHER_EVENT)
 ss["chain"] = chain()
 run("perda de carga grande no Nordeste")
 click(AT.T_END)
+click(AT.T_CRIT_SKIP)   # v6.6.3: AT12
 check("4b: 'Encerrar' after an answered 'Outro' keeps it in the closing summary",
       step() == "IDLE" and "  - Outro — perda de carga grande no Nordeste" in reply(), reply())
 at_state("ATS5", SMALL)
@@ -502,12 +512,9 @@ for q in ("Qual o tempo de eliminação do defeito?", "quanto tempo dura o curto
     at_state("AT11", AT5D, ch)
     click("Curto-circuito")
     run(q)
-    check(f"4c: '{q}' → Procedimentos de Rede sentence, no numbers, no LLM",
-          reply().startswith(AT.FAULT_TIMES_TEXT) and not llm_called(ch) and step() == "AT11"
+    check(f"4c → v6.6.3 (3f): '{q}' → the voltage question, no numbers, no LLM",
+          reply() == AT.KV_QUESTION and not llm_called(ch) and step() == "AT11"
           and data().get("event_pending") == "Curto-circuito")
-check("4c: the sentence is exactly as specified",
-      AT.FAULT_TIMES_TEXT == "Os tempos de eliminação de defeito devem seguir os critérios dos Procedimentos de "
-                             "Rede do ONS.")
 
 
 def anatem_texts():
@@ -518,14 +525,15 @@ def anatem_texts():
         for sub in subs:
             d = dict(AT5D, **sub)
             out += [AT.question(s_, d), AT._entry(s_, copy.deepcopy(d))]
-    out += [AT.at3_error_message(), AT.anat0_error_reply(AT.parse_anat0_error(THOMAS_PASTE)), AT.FAULT_TIMES_TEXT,
+    out += [AT.at3_error_message(), AT.anat0_error_reply(AT.parse_anat0_errors(THOMAS_PASTE)), AT.KV_QUESTION,
             AT.OTHER_EVENT_TAIL, AT.at5_dmaq_answer(AT5D), AG.RULE, AG.OTHER_EVENT_RULE, AG.FILTER_NOTE]
     return out
 
 
-fault_nums = [t for t in anatem_texts()
-              if re.search(r"\d+(?:[.,]\d+)?\s*(?:ms|ciclos?|s\b|segundos?)", t) or re.search(r"subm[oó]dulo", t, re.I)]
-check("4c: no fault times / Procedimentos de Rede submodules anywhere in the ANATEM texts", not fault_nums,
+# v6.6.3: fault times now come only from Tabela 2 AFTER a voltage answer (test_anatem_v663.py);
+# the step texts themselves still carry no clearing time.
+fault_nums = [t for t in anatem_texts() if re.search(r"\d+(?:[.,]\d+)?\s*(?:ms|ciclos?)\b", t)]
+check("4c (v6.6.3): no fault clearing time in the ANATEM step texts", not fault_nums,
       [t[:80] for t in fault_nums])
 
 
@@ -533,15 +541,15 @@ check("4c: no fault times / Procedimentos de Rede submodules anywhere in the ANA
 section("8. Version, release notes, PENDING REVIEW markers")
 # ═════════════════════════════════════════════════════════════════════════════
 notes = RELEASE_NOTES["v6.6.2"]
-check("APP_VERSION v6.6.2 with DRAFT PT-BR notes (6 novidades, 5 o que testar)",
-      APP_VERSION == "v6.6.2" and "DRAFT" in notes["status"] and len(notes["novidades"]) == 6
+check("APP_VERSION v6.6.3; v6.6.2 DRAFT PT-BR notes kept (6 novidades, 5 o que testar)",
+      APP_VERSION == "v6.6.3" and "DRAFT" in notes["status"] and len(notes["novidades"]) == 6
       and len(notes["o_que_testar"]) == 5)
 gsrc = open("agents/anatem_guard.py", encoding="utf-8").read()
 for name in ("RULE", "OTHER_EVENT_RULE", "FILTER_NOTE"):
     i = gsrc.index(f"\n{name} =")
     check(f"guard {name} marked PENDING REVIEW", "PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)" in gsrc[i - 200:i])
 for name in ("_AT3_FIX_STEPS", "_AT3_ERROR_WHY", "def anat0_error_reply", "def _darq_sav_items", "def at5_dmaq_answer",
-             "_AT10B_MAIN", "_OTHER_EVENT_ASK", "OTHER_EVENT_TAIL", "FAULT_TIMES_TEXT", "MANUAL_LINE"):
+             "_AT10B_MAIN", "_OTHER_EVENT_ASK", "OTHER_EVENT_TAIL", "KV_QUESTION", "MANUAL_LINE"):
     i = src.index(name if name.startswith("def ") else f"\n{name} =")
     check(f"{name.replace('def ', '')} marked PENDING REVIEW",
           "PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)" in src[max(0, i - 400):i])
@@ -550,10 +558,10 @@ for name in ("_AT3_FIX_STEPS", "_AT3_ERROR_WHY", "def anat0_error_reply", "def _
 # ═════════════════════════════════════════════════════════════════════════════
 section("9. The tests are not trivial: 190 parser broken, fences allowed, PSS button removed")
 # ═════════════════════════════════════════════════════════════════════════════
-saved = (AT._ANAT0_190_RE, AG._FENCE_RE, SI.anatem_controls)
-AT._ANAT0_190_RE = re.compile(r"(?!x)x")
+saved = (AT._ANAT0_MW_RE, AG._FENCE_RE, SI.anatem_controls)   # v6.6.3: the MW-values regex
+AT._ANAT0_MW_RE = re.compile(r"(?!x)x")
 check("broken 190 parser → the 2a test FAILS", not t_190())
-AT._ANAT0_190_RE = saved[0]
+AT._ANAT0_MW_RE = saved[0]
 AG._FENCE_RE = re.compile(r"(?!x)x")
 check("fenced blocks re-allowed in the filter → the Part 1 filter test FAILS",
       not t_filter(*AG.filter_answer(BAD_ANSWER)))

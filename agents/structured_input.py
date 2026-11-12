@@ -19,6 +19,8 @@ Control specs:
 
 import re
 
+from config.ons_criteria import POST_DISTURBANCE_CRITERIA
+
 from agents import anatem_flow as AT
 
 # Substrings the state machine treats as commands anywhere in a message (global
@@ -308,6 +310,13 @@ def anatem_controls(step, data):
     if step == AT.PROGRAM_CHOICE_STEP:
         return [_buttons(_opt("⚡ ANAREDE — fluxo de potência (regime permanente)", AT.T_PROGRAM_ANAREDE),
                          _opt("🌀 ANATEM — estabilidade eletromecânica (dinâmica)", AT.T_PROGRAM_ANATEM))]
+    stage = data.get("fault_stage")   # v6.6.3: fault-time questions (any ANATEM step)
+    if stage == "kv":
+        return [_buttons(*[_opt(str(kv)) for kv in AT.TABLE_KV], _opt(AT.T_KV_OTHER))]
+    if stage == "telep":
+        return [_buttons(_opt(AT.T_TELEP_YES), _opt(AT.T_TELEP_NO))]
+    if stage == "line":
+        return [_buttons(_opt(AT.T_NO_PRIOR_FAULT), _opt(AT.T_SLG_FAULT))]
     if step == "AT1":
         return [_buttons(_opt("1 — SIN (base ONS)", AT.T_ONS), _opt("2 — SIN (base EPE)", AT.T_EPE),
                          _opt("3 — Caso pequeno / rede própria", AT.T_SMALL))]
@@ -359,6 +368,11 @@ def anatem_controls(step, data):
         n = len(AT.EVENT_LABELS)
         return [_buttons(*[_opt(f"{i} — {label}", label) for i, label in enumerate(AT.EVENT_LABELS, 1)],
                          _opt(f"{n + 1} — {AT.T_OTHER_EVENT}", AT.T_OTHER_EVENT), _opt(AT.T_END))]
+    if step == "AT12":   # v6.6.3: ONS criteria (2.4.3.7)
+        if data.get("crit_stage") == "which":
+            return [_buttons(*[_opt(f"{i} — {label}", str(i)) for i, label in POST_DISTURBANCE_CRITERIA],
+                             _opt(AT.T_CRIT_DONE))]
+        return [_buttons(_opt(AT.T_CRIT_OK), _opt(AT.T_CRIT_VIOLATED), _opt(AT.T_CRIT_SKIP))]
     if step == "ATS2":
         if AT.ats2_files_question(data):
             return [_buttons(_opt(AT.T_HAS_FILES), _opt(AT.T_NO_FILES))]
@@ -646,9 +660,11 @@ STEP_SEQUENCES = {
 }
 
 
-def progress(sim_type, step):
-    """(n, m) for 'Passo n de m', or (None, None) when the step is outside the sequence."""
-    if sim_type == AT.SIM_TYPE and str(step).startswith("ATS"):
+def progress(sim_type, step, data=None):
+    """(n, m) for 'Passo n de m', or (None, None) when the step is outside the sequence.
+    v6.6.3: AT12 closes both ANATEM paths; `data` tells the small case apart."""
+    if sim_type == AT.SIM_TYPE and (str(step).startswith("ATS") or (
+            step == "AT12" and (data or {}).get("base") == "PEQUENO")):
         sim_type = "ANATEM_PEQUENO"
     seq = STEP_SEQUENCES.get(sim_type or "BESS")
     if not seq or step not in seq:

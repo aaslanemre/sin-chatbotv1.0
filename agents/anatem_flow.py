@@ -7,10 +7,11 @@ in ANAREDE/ANATEM at each step of a dynamic (electromechanical stability) study.
 It generates NO ANATEM text: no DEVT, STB, DMAQ, DFNT, TITU, DSIM/EXSI lines.
 
 Main flow (SIN base, ONS or EPE):
-  AT1 → AT2 → AT3 (ANAT0) → AT4 → AT5 → AT6 → AT7 → AT8 → (AT9 ⇄ AT8) → AT10 → AT11 → end
+  AT1 → AT2 → AT3 (ANAT0) → AT4 → AT5 → AT6 → AT7 → AT8 → (AT9 ⇄ AT8) → AT10 → AT11 → AT12 → end
   (v6.6.2: AT10 "Oscilação maior" → AT10B → AT8 or AT9)
 Small case / own network (option 3 at AT1, no ANAT0):
-  AT1 → ATS2 → ATS3 → ATS4 (→ AT9 → ATS4; → AT10B → ATS4 or AT9) → ATS5 → end
+  AT1 → ATS2 → ATS3 → ATS4 (→ AT9 → ATS4; → AT10B → ATS4 or AT9) → ATS5 → AT12 → end
+  (v6.6.3: AT12 only when at least one event was registered; otherwise ATS5/AT11 → end)
 
 v6.6.1 (revised Word guide + expert feedback P1–P5): ATS2 first asks whether the
 user has a .SAV and a .STB (example-case guidance when not); AT6/ATS3 first ask
@@ -24,6 +25,12 @@ unmatched typed text of 4+ words at a button step goes to the free chat (reply N
 AT5/ATS2 explain DARQ by columns; AT9 Passo C has GOV/AVR/PSS; "Oscilação maior" goes
 to the new step AT10B (controles atuando); events show the card names, the manual
 link and a 5th option "Outro" answered by the free chat.
+
+v6.6.3 (Thomas's answers + ONS Procedimentos de Rede, Submódulo 2.3): save path
+"Histórico > Operações > Salvar"; the ANAT0 error is read by its description; a
+short circuit (or a line loss with a single-phase fault) asks the operating voltage
+and answers the indicative clearing times of Tabela 2 (config/ons_criteria.py);
+"Encerrar" with at least one event goes to the new step AT12 (ONS criteria 2.4.3.7).
 
 handle(step, data, text) -> (new_step, reply). new_step "IDLE" means the
 simulation ends (the app resets its state). `data` (sim_data) is mutated in place
@@ -44,15 +51,19 @@ import unicodedata
 
 from agents.anatem_guard import MANUAL_URL as MANUAL_DEVT_URL, OTHER_EVENT_RULE
 from agents.ux import with_details
+from config.ons_criteria import (FAULT_TIME_CAVEAT, LINE_LOSS_TIP, NOT_IN_TABLE_TEXT, ONS_SOURCE,
+                                  POST_DISTURBANCE_CRITERIA, SIMULATION_TIME_NOTE, TABLE_KV,
+                                  TELEPROTECTION_KV, fault_clearing_times)
 
 SIM_TYPE = "ANATEM"
 PROGRAM_CHOICE_STEP = "IDLE_PROGRAM_CHOICE"
 
-MAIN_STEPS = ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT10", "AT11"]
-SMALL_STEPS = ["AT1", "ATS2", "ATS3", "ATS4", "ATS5"]
+# v6.6.3: AT12 (ONS criteria) closes both paths.
+MAIN_STEPS = ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT10", "AT11", "AT12"]
+SMALL_STEPS = ["AT1", "ATS2", "ATS3", "ATS4", "ATS5", "AT12"]
 # v6.6.2: AT10B (controles atuando) is a detour of AT10 and ATS4, reached only from
 # "Oscilação maior"; it is outside the "Passo N de M" sequences.
-ALL_STEPS = MAIN_STEPS + SMALL_STEPS[1:] + ["AT10B"]
+ALL_STEPS = list(dict.fromkeys(MAIN_STEPS + SMALL_STEPS[1:] + ["AT10B"]))
 EVENT_STEPS = ("AT11", "ATS5")
 
 STEP_LABELS = {
@@ -68,6 +79,7 @@ STEP_LABELS = {
     "AT10": "ANATEM 10: Verificação das variáveis",
     "AT10B": "ANATEM 10B: Controles atuando",
     "AT11": "ANATEM 11: Eventos (DEVT)",
+    "AT12": "ANATEM 12: Critérios do ONS",
     "ATS2": "ANATEM caso pequeno 2: .stb e DMAQ",
     "ATS3": "ANATEM caso pequeno 3: Equipamentos",
     "ATS4": "ANATEM caso pequeno 4: Teste sem eventos",
@@ -88,6 +100,7 @@ NUDGE_LABELS = {
     "AT10": "as variáveis plotadas",
     "AT10B": "os controles atuando",
     "AT11": "os eventos (DEVT)",
+    "AT12": "a verificação dos critérios do ONS",
     "ATS2": "o .sav, o caso e as barras de geração",
     "ATS3": "os modelos dos equipamentos",
     "ATS4": "o teste sem eventos",
@@ -135,6 +148,12 @@ HANDOFF_TEXT = "Continuar para o ANATEM"
 # v6.6.2
 T_CTRL_ADJUSTED, T_NO_CTRL = "Sim, ajustei e vou rodar de novo", "Não há controle atuando"
 T_OTHER_EVENT = "Outro / descrever o que quero analisar"
+# v6.6.3
+T_KV_OTHER = "Outra"
+T_TELEP_YES, T_TELEP_NO = "Com teleproteção", "Sem teleproteção"
+T_NO_PRIOR_FAULT, T_SLG_FAULT = "Sem curto prévio", "Com curto monofásico"
+T_CRIT_OK, T_CRIT_VIOLATED, T_CRIT_SKIP = "Todos atendidos", "Algum critério violado", "Pular verificação"
+T_CRIT_DONE = "Concluir"
 
 
 # ── normalisation ─────────────────────────────────────────────────────────────
@@ -429,11 +448,16 @@ def at3_error_message() -> str:
 
 
 # ── 2a: an ANAT0 error pasted at AT3 ──────────────────────────────────────────
+# v6.6.3 (Thomas: "error codes are not so important, the description is; usually related
+# to active power or number of units on"): the error is read by its DESCRIPTION. The code
+# (ANAT01-NNN), when present, is only a label.
 
-_ANAT0_ERR_RE = re.compile(r"\*{3}\s*ERRO\s*-\s*ANAT01-(\d+)", re.I)
-_ANAT0_190_RE = re.compile(
-    r"potencia\s+gerada\s*\(\s*(\d+(?:[.,]\d+)?)\s*mw\s*\)\s*inferior\s+ao\s+minimo\s*"
-    r"\(\s*(\d+(?:[.,]\d+)?)\s*mw\s*\)", re.I)
+_ANAT0_ERR_LINE_RE = re.compile(r"\*{3}\s*ERRO\b", re.I)
+_ANAT0_CODE_RE = re.compile(r"\bANAT01-(\d+)", re.I)
+_ANAT0_CUE_RE = re.compile(r"\b(?:potencia gerada|unidades|limite)\b")
+_ANAT0_MW_RE = re.compile(r"\(\s*(\d+(?:[.,]\d+)?)\s*MW\s*\)", re.I)
+_ANAT0_BARRA_RE = re.compile(r"\bbarra\s*(?:n(?:[ºo°.]|umero|úmero)?\s*)?(\d{1,5})(?![.,]?\d)", re.I)
+MAX_ANAT0_ERRORS = 5
 
 
 def _strip_accents(text) -> str:
@@ -441,22 +465,58 @@ def _strip_accents(text) -> str:
     return "".join(c for c in t if not unicodedata.combining(c))
 
 
-def parse_anat0_error(text):
-    """{'code', 'bus', 'group', 'name', 'gen', 'min'} for a pasted '*** ERRO - ANAT01-NNN';
-    None when the message has no such line. Bus/group/name only from the record line that
-    follows a '(Nb' header; gen/min only from 'Potencia gerada (X MW) inferior ao minimo (Y MW)'."""
-    t = _strip_accents(text)
-    m = _ANAT0_ERR_RE.search(t)
-    if not m:
-        return None
-    err = {"code": f"ANAT01-{m.group(1)}", "bus": None, "group": None, "name": None,
-           "gen": None, "min": None}
-    lines = [ln.strip() for ln in t.splitlines()]
+def is_anat0_error_text(text) -> bool:
+    """A '*** ERRO' line, or a cue ('potência gerada', 'unidades', 'limite') with a number."""
+    if _ANAT0_ERR_LINE_RE.search(text or ""):
+        return True
+    return bool(_ANAT0_CUE_RE.search(norm(text)) and re.search(r"\d", text or ""))
+
+
+def _anat0_blocks(text):
+    """One list of lines per error. In the ANAT0 report the '*** ERRO' line CLOSES its
+    block (record and description above it); if the paste starts with it, it OPENS it."""
+    lines = [ln.strip() for ln in str(text or "").splitlines()]
+    marks = [i for i, ln in enumerate(lines) if _ANAT0_ERR_LINE_RE.search(ln)]
+    if not marks:
+        return [lines]
+    if not any(lines[:marks[0]]):
+        bounds = marks + [len(lines)]
+        return [lines[a:b] for a, b in zip(bounds, bounds[1:])]
+    bounds = [-1] + marks
+    blocks = [lines[a + 1:b + 1] for a, b in zip(bounds, bounds[1:])]
+    tail = lines[marks[-1] + 1:]
+    if _ANAT0_CUE_RE.search(norm(" ".join(tail))):   # a last error pasted without its ERRO line
+        blocks.append(tail)
+    return blocks
+
+
+def _anat0_classify(desc):
+    """('active' | 'reactive' | 'units' | None, 'down' | 'up' | None) from the description."""
+    n = norm(desc)
+    down = _has(n, "inferior", "abaixo", "minimo")
+    up = _has(n, "superior", "acima", "maximo")
+    direction = "down" if down and not up else "up" if up and not down else None
+    if _has(n, "potencia") and _has(n, "mw", "ativa"):
+        return "active", direction
+    if _has(n, "mvar") or re.search(r"\breativ", n):
+        return "reactive", direction
+    if _has(n, "unidade", "unidades"):
+        return "units", direction
+    return None, direction
+
+
+def _parse_anat0_block(lines) -> dict:
+    err = {"code": None, "bus": None, "group": None, "name": None, "gen": None, "min": None,
+           "max": None, "description": [], "kind": None, "direction": None}
+    rec_i = None
     for i, ln in enumerate(lines):
         if not ln.startswith("(Nb"):
             continue
-        rec = next((r for r in lines[i + 1:] if r), "")
-        toks = rec.split()
+        rec_i = next((k for k in range(i + 1, len(lines)) if lines[k]), None)
+        rec = lines[rec_i] if rec_i is not None else ""
+        if not re.match(r"\d", rec):
+            rec_i = None   # not a numeric record: it is part of the description
+        toks = _strip_accents(rec).split()
         ints = []
         for tok in toks:
             if not re.fullmatch(r"\d+", tok):
@@ -466,10 +526,43 @@ def parse_anat0_error(text):
         if len(ints) >= 2 and name:
             err.update(bus=str(int(ints[0])), group=str(int(ints[1])), name=name)
         break
-    p = _ANAT0_190_RE.search(t)
-    if p:
-        err["gen"], err["min"] = p.group(1), p.group(2)
+    block = "\n".join(lines)
+    code = _ANAT0_CODE_RE.search(block)
+    if code:
+        err["code"] = f"ANAT01-{code.group(1)}"
+    desc = [ln for i, ln in enumerate(lines)
+            if ln and i != rec_i and not ln.startswith("(Nb") and not _ANAT0_ERR_LINE_RE.search(ln)]
+    err["description"] = desc
+    if not err["bus"]:
+        m = _ANAT0_BARRA_RE.search(_strip_accents(" ".join(desc)))
+        if m:
+            err["bus"] = str(int(m.group(1)))
+    err["kind"], err["direction"] = _anat0_classify(" ".join(desc))
+    mw = _ANAT0_MW_RE.findall(_strip_accents(" ".join(desc)))
+    if err["kind"] == "active" and len(mw) >= 2:
+        err["gen"] = mw[0]
+        if err["direction"] == "down":
+            err["min"] = mw[1]
+        elif err["direction"] == "up":
+            err["max"] = mw[1]
     return err
+
+
+def parse_anat0_errors(text) -> list:
+    """Every error in a message typed/pasted at AT3 (see is_anat0_error_text); [] when the
+    message is not an ANAT0 error. Blocks with neither a description nor a code are dropped."""
+    if not is_anat0_error_text(text):
+        return []
+    errs = [_parse_anat0_block(b) for b in _anat0_blocks(text)]
+    return [e for e in errs if e["description"] or e["code"]]
+
+
+def parse_anat0_error(text):
+    """v6.6.2 API: the first error as {'code', 'bus', 'group', 'name', 'gen', 'min'}, or None."""
+    errs = parse_anat0_errors(text)
+    if not errs:
+        return None
+    return {k: errs[0][k] for k in ("code", "bus", "group", "name", "gen", "min")}
 
 
 def _num(value) -> float:
@@ -477,21 +570,70 @@ def _num(value) -> float:
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-def anat0_error_reply(err) -> str:
-    """ANAT01-190 with both powers (Y > X): the fix. Any other code: the code (+ bus) and
-    the generic procedure — the meaning of other codes is never described."""
-    code = err["code"]
-    where = f" na barra **{err['bus']} ({err['name']})**" if err.get("bus") else ""
-    if code == "ANAT01-190" and err.get("gen") and err.get("min") and _num(err["min"]) > _num(err["gen"]):
-        x, y = err["gen"], err["min"]
-        bus = f" {err['bus']}" if err.get("bus") else " indicada no erro"
-        return (
-            f"Erro **{code}**{where}: a potência gerada (**{x} MW**) está abaixo do mínimo das "
-            f"máquinas (**{y} MW**). Como {y} > {x}: no ANAREDE, aumente a geração da barra{bus} "
-            f"para pelo menos **{y} MW** (ou ajuste o despacho das máquinas), rode o fluxo de "
-            "potência, confira se convergiu, salve o .SAV e execute o ANAT0 novamente.\n\n" + _AT3_RAN_Q
-        )
-    return f"Erro **{code}**{where}.\n\n**Como corrigir:**\n{_AT3_FIX_STEPS}\n\n{_AT3_RAN_Q}"
+_ANAT0_TAIL = ("Depois: rode o fluxo de potência, confira se convergiu, salve o .SAV "
+               "(**Histórico > Operações > Salvar**) e execute o ANAT0 novamente.")
+_ANAT0_UNKNOWN = "Não reconheci o tipo desse erro."
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def _anat0_advice(err) -> str:
+    """Deterministic advice from the classified description (2d)."""
+    bus = err.get("bus")
+    bus_ref = bus or "indicada no erro"
+    kind, x = err.get("kind"), err.get("gen")
+    if kind == "active":
+        y = err.get("min")
+        if y and _num(y) > _num(x):
+            return (f"A potência gerada (**{x} MW**) está abaixo do mínimo das máquinas (**{y} MW**). "
+                    f"No ANAREDE, aumente a geração ativa da barra {bus_ref} para pelo menos **{y} MW** "
+                    "(ou ajuste o despacho das máquinas).")
+        y = err.get("max")
+        if y and _num(y) < _num(x):
+            return (f"A potência gerada (**{x} MW**) está acima do máximo das máquinas (**{y} MW**). "
+                    f"No ANAREDE, reduza a geração ativa da barra {bus_ref} para no máximo **{y} MW** "
+                    "(ou ajuste o despacho das máquinas).")
+        return (f"O erro é de **potência ativa**. No ANAREDE, ajuste a geração ativa da barra {bus_ref} "
+                "para ficar dentro dos limites das máquinas.")
+    if kind == "reactive":
+        return (f"O erro é de **potência reativa**. No ANAREDE, alivie a geração/absorção de reativo da "
+                f"barra {bus_ref} (ajustando a tensão controlada, taps ou compensação próxima).")
+    if kind == "units":
+        # PENDING REVIEW: exact advice for unit-count errors.
+        where = f" na barra {bus}" if bus else ""
+        return (f"O erro está relacionado ao **número de unidades** em operação da usina{where}. O ANAT0 "
+                "ajusta o número de unidades ao despacho do caso, com base nos limites e na quantidade de "
+                "máquinas cadastradas no BNT1.DAT. Revise o despacho dessa usina no ANAREDE para que seja "
+                "compatível com as unidades disponíveis.")
+    return _ANAT0_UNKNOWN
+
+
+def _anat0_item(err) -> str:
+    label = f"Erro **{err['code']}**" if err.get("code") else "Erro do ANAT0"
+    if err.get("bus"):
+        label += f" na barra **{err['bus']}" + (f" ({err['name']})" if err.get("name") else "") + "**"
+    desc = err.get("description") or []
+    quoted = ("Descrição lida:\n" + "\n".join(f"> {ln}" for ln in desc) if desc
+              else "Não encontrei a descrição do erro no trecho colado.")
+    return f"{label}.\n\n{quoted}\n\n{_anat0_advice(err)}"
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def anat0_error_reply(errs) -> str:
+    """One or several parsed errors (2e: max MAX_ANAT0_ERRORS listed) → advice per error,
+    the short tail and the AT3 question. An unrecognised error adds the 6-step procedure."""
+    if isinstance(errs, dict):
+        errs = [errs]
+    shown = errs[:MAX_ANAT0_ERRORS]
+    if len(shown) == 1:
+        body = _anat0_item(shown[0])
+    else:
+        head = f"**Encontrei {len(errs)} erros no trecho colado"
+        head += f" (mostro os {MAX_ANAT0_ERRORS} primeiros)" if len(errs) > len(shown) else ""
+        body = head + ":**\n\n" + "\n\n".join(f"**{i}.** {_anat0_item(e)}" for i, e in enumerate(shown, 1))
+    if any(e.get("kind") is None for e in shown):
+        body += f"\n\n**Como corrigir:**\n{_AT3_FIX_STEPS}"
+    return f"{body}\n\n{_ANAT0_TAIL}\n\n{_AT3_RAN_Q}"
+
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
 # v6.6.1: neutral example. OPEN: the Word file uses "dmaq_anat0.dma" here and ".DMA/.DAT"
@@ -813,19 +955,26 @@ def event_cards(label) -> list:
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-def _event_reminder(label) -> str:
+def _event_head(label) -> str:
     needs = next(e[3] for e in EVENT_TYPES if e[0] == label)
     cards = event_cards(label)
     noun = "cartões" if len(cards) > 1 else "cartão"
-    return (
-        f"**{label}** — {noun} do DEVT: **{', '.join(cards)}**\n\n"
-        f"Para esse evento, defina: {needs}.\n\n"
-        f"Insira o evento no bloco **DEVT** do .stb, rode o ANATEM ({RUN_SHORT}) e salve os "
-        "resultados.\n\n"
-        f"{MANUAL_LINE}\n\n"
-        f"Clique em **{T_EVENT_DONE}** quando terminar, ou descreva o evento "
-        "(ex: barra, instantes de início e fim)."
-    )
+    return (f"**{label}** — {noun} do DEVT: **{', '.join(cards)}**\n\n"
+            f"Para esse evento, defina: {needs}.")
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+_EVENT_TAIL = (
+    f"Insira o evento no bloco **DEVT** do .stb, rode o ANATEM ({RUN_SHORT}) e salve os "
+    "resultados.\n\n"
+    f"{MANUAL_LINE}\n\n"
+    f"Clique em **{T_EVENT_DONE}** quando terminar, ou descreva o evento "
+    "(ex: barra, instantes de início e fim)."
+)
+
+
+def _event_reminder(label) -> str:
+    return _event_head(label) + "\n\n" + _EVENT_TAIL
 
 
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
@@ -839,10 +988,62 @@ OTHER_EVENT_TAIL = (
     f"\n\n---\nClique em **{T_EVENT_DONE}** quando inserir o evento, em **{T_ADD_EVENT}** "
     f"ou em **{T_END}**."
 )
+# ── v6.6.3: fault clearing times (ONS Submódulo 2.3, Tabela 2) ───────────────
+# Numbers come ONLY from config/ons_criteria.py; a voltage outside the table gets none.
+FAULT_EVENT = "Curto-circuito"
+LINE_EVENT = "Perda de linha de transmissão"
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-# v6.6.2 (4c): never fault times nor Procedimentos de Rede submodules.
-FAULT_TIMES_TEXT = ("Os tempos de eliminação de defeito devem seguir os critérios dos "
-                    "Procedimentos de Rede do ONS.")
+KV_QUESTION = ("Qual a **tensão de operação** no ponto do curto-circuito? Escolha pelo botão ou digite o "
+               "valor (ex: `500` ou `500 kV`).")
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+TELEP_QUESTION = (f"Em **138 kV** a Tabela 2 tem dois valores. A proteção tem **teleproteção**? "
+                  f"Responda **{T_TELEP_YES}** ou **{T_TELEP_NO}**.")
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel) — item 2.4.1.2
+LINE_FAULT_QUESTION = (f"{LINE_LOSS_TIP}\n\nComo você vai simular a abertura? **{T_NO_PRIOR_FAULT}** ou "
+                       f"**{T_SLG_FAULT}**?")
+_KV_ANSWER_RE = re.compile(
+    r"(?:(?:tensao|nivel)(?: de)?(?: operacao)?(?: de| e| em)? )?(\d{2,4})(?: 0+)? ?(?:kv)?")
+
+
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+def fault_times_text(kv, teleprotection=None) -> str:
+    """Tabela 2 answer for `kv`, or the not-in-table sentence (kv None = 'Outra')."""
+    times = fault_clearing_times(kv, teleprotection) if kv else None
+    if not times:
+        return NOT_IN_TABLE_TEXT
+    t1, t2 = times
+    telep = "" if teleprotection is None else f" ({'com' if teleprotection else 'sem'} teleproteção)"
+    return (f"Tempo de eliminação indicativo para **{kv} kV**{telep}: **{t1} ms** (sem falha do disjuntor) "
+            f"ou **{t2} ms** (com falha do disjuntor). {FAULT_TIME_CAVEAT} Fonte: {ONS_SOURCE}, Tabela 2.")
+
+
+def parse_kv_answer(text):
+    """Answer to KV_QUESTION: a voltage (int), 'outra', or None. Only a bare voltage
+    ('500', '500kV', 'tensão de 500 kV'); a sentence with a number is not an answer."""
+    n = norm(text)
+    if n in ("outra", "outro", "outra tensao", "outro valor", "nenhuma"):
+        return "outra"
+    m = _KV_ANSWER_RE.fullmatch(n)
+    return int(m.group(1)) if m else None
+
+
+def parse_teleprotection(text):
+    n = norm(text)
+    if _has(n, "sem", "nao"):
+        return False
+    if _has(n, "com", "sim", "tem"):
+        return True
+    return None
+
+
+def parse_line_fault(text):
+    """'slg' (with a single-phase fault) | 'none' (no prior fault) | None."""
+    n = norm(text)
+    if _has(n, "monofasico", "com curto", "com curto monofasico"):
+        return "slg"
+    if _has(n, "sem curto", "sem curto previo", "sem"):
+        return "none"
+    return None
 _FAULT_TIME_RE = re.compile(
     r"\b(?:tempos?|instantes?|duracao|quanto tempo)\b(?: \w+){0,4}? "
     r"(?:eliminacao|abertura|defeito|falta|curto)\b")
@@ -856,11 +1057,30 @@ def asks_fault_times(text) -> bool:
     return asks and bool(_FAULT_TIME_RE.search(n))
 
 
+def _fault_label(event) -> str:
+    """' · com curto monofásico · 500 kV · 100/250 ms' from the v6.6.3 keys ('' without them)."""
+    parts = []
+    if event.get("curto_previo") == "monofasico":
+        parts.append("com curto monofásico")
+    elif event.get("curto_previo") == "sem":
+        parts.append("sem curto prévio")
+    if event.get("kv"):
+        parts.append(f"{event['kv']} kV")
+    if event.get("teleprotecao") is not None:
+        parts.append("com teleproteção" if event["teleprotecao"] else "sem teleproteção")
+    if event.get("t_sem_falha_ms") is not None:
+        parts.append(f"{event['t_sem_falha_ms']}/{event['t_com_falha_ms']} ms (Tabela 2)")
+    elif event.get("kv_fora_tabela"):
+        parts.append("tensão fora da Tabela 2")
+    return "".join(f" · {p}" for p in parts)
+
+
 def event_text(event) -> str:
-    """One event as readable text: v6.6.1 dict {'type', 'note'} or a v6.6.0 string."""
+    """One event as readable text: v6.6.1 dict {'type', 'note'} (v6.6.3: + fault keys)
+    or a v6.6.0 string."""
     if isinstance(event, dict):
         note = event.get("note") or ""
-        return (event.get("type") or "Evento") + (f" — {note}" if note else "")
+        return (event.get("type") or "Evento") + _fault_label(event) + (f" — {note}" if note else "")
     return str(event)
 
 
@@ -868,8 +1088,7 @@ def event_text(event) -> str:
 # v6.6.1 (P1): first ask whether the user has a .SAV and a .STB.
 _ATS2_FILES_Q = ("**Passo 2 — Caso pequeno.** Você já tem um arquivo .SAV e um .STB para o seu caso?")
 # PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
-# OPEN: the BESS flow says "Histórico > Operações > Salvar"; the expert wrote
-# "Arquivo > Salvar Caso Histórico" — kept as written, to be confirmed.
+# v6.6.3: save path confirmed by Thomas: "Histórico > Operações > Salvar".
 # OPEN: the exact location of the example .STB is unconfirmed: no file name or path given.
 ATS2_EXAMPLE_GUIDE = (
     "**Caso de exemplo.**\n"
@@ -877,8 +1096,7 @@ ATS2_EXAMPLE_GUIDE = (
     "**.PWF**, por exemplo o sistema-teste IEEE de 9 barras (**9BARRAS.PWF**), com o diagrama "
     "unifilar (**.LST**, ex: `9_barras.lst`) e um arquivo **.STB** desse caso.\n"
     "- No ANAREDE: abra o **9BARRAS.PWF**, rode o fluxo de potência (regime permanente) e salve "
-    "o caso convergido como arquivo histórico **.SAV** pelo menu "
-    "**Arquivo > Salvar Caso Histórico**.\n"
+    "o caso convergido como arquivo histórico **.SAV** em **Histórico > Operações > Salvar**.\n"
     "- O **.STB** do caso de exemplo também fica na pasta de instalação. Se você não o "
     "encontrar: este guia não consegue criar o .STB; use um .STB de exemplo da instalação do "
     "ANATEM ou consiga um com um colega.\n\n"
@@ -929,10 +1147,49 @@ _ATS4_MAIN = (
     "a escala do eixo Y). As variáveis ficaram em linha reta, variando, ou deu erro?"
 )
 
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+# v6.6.3 (Part 4): ONS — Procedimentos de Rede, Submódulo 2.3, item 2.4.3.7.
+_AT12_CRITERIA = (
+    "Depois do distúrbio, confira no PLOTCEPEL:\n"
+    "1. Tensão mínima na **primeira oscilação**: não pode ser inferior a **70%** da tensão nominal "
+    "(**74%** para 500 kV).\n"
+    "2. Tensão mínima nas **demais oscilações**: não pode ser inferior a **80%** (**84%** para 500 kV).\n"
+    "3. Variação entre a tensão **inicial e final** da simulação: menor que **10%** da tensão nominal "
+    "(Vfinal ≥ Vinicial − 10% Vnom).\n"
+    "4. Oscilação de tensão eficaz **pico a pico** de no máximo **2%**, após **10 s** da eliminação do "
+    "distúrbio.\n"
+    f"Fonte: {ONS_SOURCE}, item 2.4.3.7."
+)
+_AT12_SMALL_PREFIX = "Como referência (critérios do SIN):"
+_AT12_ASK = "Os critérios foram atendidos?"
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel)
+_AT12_WHICH = ("Qual critério foi violado? Clique em um ou mais (1 a 4) ou digite, por exemplo, `1 e 3`. "
+               f"Se quiser, escreva uma observação. Depois clique em **{T_CRIT_DONE}**.")
+# PENDING REVIEW BY DOMAIN EXPERT (Thomas/Gabriel) — no remedies: not in the source.
+_AT12_RECORD = "Registre a violação no relatório do estudo."
+ONS_CRITERIA_LABELS = {"atendidos": "atendidos", "violados": "violados", "nao_verificados": "não verificados"}
+
+
+def _at12_main(data) -> str:
+    if data.get("base") == "PEQUENO":
+        return (f"{_AT12_SMALL_PREFIX}\n\n**Passo 6 — Verificação dos resultados (critérios do ONS).** "
+                f"{_AT12_CRITERIA}\n\n{_AT12_ASK}")
+    return (f"**Passo 12 — Verificação dos resultados (critérios do ONS).** {_AT12_CRITERIA}\n\n"
+            f"{_AT12_ASK}")
+
+
+def _at12_which(data) -> str:
+    marked = data.get("ons_violated") or []
+    head = f"Critérios marcados: **{', '.join(map(str, marked))}**.\n\n" if marked else ""
+    return head + _AT12_WHICH
+
+
 _STEP_DETAILS = {
     "AT1": _AT1_NOTE, "AT2": _AT2_NOTE, "AT3": _AT3_DETAILS, "AT4": _AT4_DETAILS,
     "AT5": STB_CODES, "AT7": _AT7_DETAILS, "AT9": CDU_NOTE, "ATS2": _ATS2_DETAILS,
-    "AT11": EVENT_CODES_NOTE, "ATS5": EVENT_CODES_NOTE,
+    # v6.6.3 (3e): the usual simulation time, once, in the events "Detalhes"
+    "AT11": EVENT_CODES_NOTE + "\n\n" + SIMULATION_TIME_NOTE,
+    "ATS5": EVENT_CODES_NOTE + "\n\n" + SIMULATION_TIME_NOTE,
 }
 
 
@@ -941,6 +1198,8 @@ _STEP_DETAILS = {
 def question(step, data) -> str:
     """The question for the CURRENT step and sub-state (no 'Detalhes')."""
     data = data or {}
+    if data.get("fault_stage"):   # v6.6.3: voltage / teleprotection / line-fault question
+        return {"kv": KV_QUESTION, "telep": TELEP_QUESTION, "line": LINE_FAULT_QUESTION}[data["fault_stage"]]
     if step == "AT1":
         return _at1_question(data)
     if step == "AT2":
@@ -985,6 +1244,8 @@ def question(step, data) -> str:
         if data.get("events") and not data.get("event_menu"):
             return f"**{len(data['events'])} evento(s) registrado(s).** Deseja adicionar outro evento ou encerrar?"
         return _events_main(step)
+    if step == "AT12":
+        return _at12_which(data) if data.get("crit_stage") == "which" else _at12_main(data)
     if step == "ATS2":
         if ats2_files_question(data):
             return _ATS2_FILES_Q
@@ -1013,7 +1274,9 @@ def _entry(step, data) -> str:
 
 # Per-step sub-states; entering any step starts it clean.
 _SUBSTATE_KEYS = ("at2_confirm", "anat0_error", "cdu", "osc_pending", "ats2_files",
-                  "event_pending", "event_menu", "event_other", "event_note", "event_llm")
+                  "event_pending", "event_menu", "event_other", "event_note", "event_llm",
+                  "fault_stage", "fault", "fault_kv", "fault_free", "fault_resume",   # v6.6.3
+                  "crit_stage", "ons_violated", "ons_note")
 
 
 def _enter(step, data, prefix=""):
@@ -1332,6 +1595,14 @@ def closing_summary(data) -> str:
     body = "\n".join(f"- {k}: **{v}**" for k, v in rows)
     body += "\n- Eventos: " + ("nenhum informado" if not events else "")
     body += "".join(f"\n  - {event_text(e)}" for e in events)
+    crit = data.get("ons_criteria")
+    if crit:   # v6.6.3 (4c): only when AT12 was reached
+        value = ONS_CRITERIA_LABELS[crit]
+        if crit == "violados":
+            value += ": " + ", ".join(map(str, data.get("ons_violated") or []))
+        body += f"\n- Critérios ONS (2.4.3.7): **{value}**"
+        if crit == "violados" and data.get("ons_note"):
+            body += f" — {data['ons_note']}"
     return (
         "✅ **Simulação registrada.**\n\n**Resumo do estudo:**\n" + body + "\n\n"
         "Para uma nova simulação, use os botões **⚡ Iniciar simulação ANAREDE** ou "
@@ -1349,6 +1620,12 @@ ENDED_TEXT = ("Sessão de simulação encerrada. Os resultados ficam registrados
 _BACK = {"AT2": "AT1", "AT3": "AT2", "AT4": "AT3", "AT5": "AT4", "AT6": "AT5", "AT7": "AT6",
          "AT8": "AT7", "AT10": "AT8", "AT10B": "AT10", "AT11": "AT10",
          "ATS2": "AT1", "ATS3": "ATS2", "ATS4": "ATS3", "ATS5": "ATS4"}
+
+
+def _back_step(step, data):
+    if step == "AT12":   # v6.6.3: back to the events step of the same path
+        return "ATS5" if data.get("base") == "PEQUENO" else "AT11"
+    return _BACK[step]
 
 
 def _retry(step, data, head):
@@ -1417,24 +1694,36 @@ def _ctrl_acting_step(data, text):
     return _unmatched("AT10B", data, f"Responda **{T_CTRL_ADJUSTED}** ou **{T_NO_CTRL}**.", text)
 
 
+def _register_event(data, label, note):
+    """Append {"type", "note"} (+ v6.6.3 fault keys: curto_previo, kv, teleprotecao,
+    t_sem_falha_ms, t_com_falha_ms, kv_fora_tabela) and clear the fault sub-state."""
+    event = {"type": label, "note": note}
+    event.update(data.pop("fault", None) or {})
+    data.pop("fault_stage", None)
+    events = data.setdefault("events", [])
+    events.append(event)
+    return events
+
+
 def _events_step(step, data, text):
     """AT11 / ATS5 (v6.6.1): menu → reminder → 'Evento inserido' or a description.
-    Each event is stored as {"type": label, "note": free text or ""}."""
+    Each event is stored as {"type": label, "note": free text or ""} (v6.6.3: + fault keys).
+    v6.6.3: 'Encerrar' with at least one event goes to AT12 (ONS criteria)."""
     n = norm(text)
     if is_end(text):
         if data.get("event_pending") == OTHER_EVENT:   # described and answered: keep it
-            data.setdefault("events", []).append(
-                {"type": OTHER_EVENT, "note": data.pop("event_note", "") or ""})
+            _register_event(data, OTHER_EVENT, data.pop("event_note", "") or "")
         data.pop("event_pending", None)
         data.pop("event_menu", None)
+        if data.get("events"):
+            return _enter("AT12", data, f"**{len(data['events'])} evento(s) registrado(s).**\n\n")
         return "IDLE", closing_summary(data)
     pending = data.get("event_pending")
     if pending == OTHER_EVENT:
         add = n in ("adicionar outro evento", "adicionar", "outro evento", "adicionar evento",
                     "mais um evento")
         if n in _EVENT_DONE or add:
-            events = data.setdefault("events", [])
-            events.append({"type": OTHER_EVENT, "note": data.pop("event_note", "") or ""})
+            events = _register_event(data, OTHER_EVENT, data.pop("event_note", "") or "")
             data.pop("event_pending", None)
             data.pop("event_menu", None)
             head = f"Evento {len(events)} registrado: **{event_text(events[-1])}**."
@@ -1450,8 +1739,7 @@ def _events_step(step, data, text):
         note = "" if n in _EVENT_DONE else re.sub(r"\s+", " ", text or "").strip()[:300]
         if n not in _EVENT_DONE and len(note) < 3:
             return _retry(step, data, "Não identifiquei a resposta.")
-        events = data.setdefault("events", [])
-        events.append({"type": pending, "note": note})
+        events = _register_event(data, pending, note)
         data.pop("event_pending", None)
         data.pop("event_menu", None)
         return step, (f"Evento {len(events)} registrado: **{event_text(events[-1])}**.\n\n"
@@ -1468,7 +1756,151 @@ def _events_step(step, data, text):
         data["event_other"] = True
         return step, _OTHER_EVENT_ASK
     data["event_pending"] = label
+    data.pop("fault", None)
+    if label == FAULT_EVENT:   # v6.6.3 (3b): ask the operating voltage first
+        data["fault_stage"] = "kv"
+        return step, _event_head(label) + "\n\n" + KV_QUESTION
+    if label == LINE_EVENT:    # v6.6.3 (3c): without / with a single-phase fault
+        data["fault_stage"] = "line"
+        return step, _event_head(label) + "\n\n" + LINE_FAULT_QUESTION
     return step, _event_reminder(label)
+
+
+def _fault_done(step, data, kv, teleprotection=None):
+    """Tabela 2 answer (kv None = 'Outra'). Bound to the pending event: stored in
+    data['fault'], then the rest of the event reminder. A free question (3f): answered,
+    then the step question again; nothing stored."""
+    typed = data.pop("fault_kv", None) or kv
+    text = fault_times_text(kv, teleprotection)
+    times = fault_clearing_times(kv, teleprotection) if kv else None
+    data.pop("fault_stage", None)
+    if data.pop("fault_free", None):
+        resume = data.pop("fault_resume", None)
+        if resume:
+            data["fault_stage"] = resume
+        return step, f"{text}\n\n---\n\n{question(step, data)}"
+    fault = data.setdefault("fault", {})
+    for k in ("kv", "teleprotecao", "t_sem_falha_ms", "t_com_falha_ms", "kv_fora_tabela"):
+        fault.pop(k, None)   # a new answer replaces the previous one
+    if typed:
+        fault["kv"] = typed
+    if teleprotection is not None:
+        fault["teleprotecao"] = teleprotection
+    if times:
+        fault["t_sem_falha_ms"], fault["t_com_falha_ms"] = times
+    else:
+        fault["kv_fora_tabela"] = True
+    return step, f"{text}\n\n{_EVENT_TAIL}"
+
+
+def _fault_step(step, data, text):
+    """v6.6.3: an answer at the voltage / teleprotection / line-fault question, or None
+    (not such an answer: the event goes on as before — 'Evento inserido' or a description;
+    a free fault-time question at another step is dropped)."""
+    stage = data["fault_stage"]
+    hit = None
+    if stage == "line":
+        choice = parse_line_fault(text)
+        if choice == "slg":
+            data.setdefault("fault", {})["curto_previo"] = "monofasico"
+            data["fault_stage"] = "kv"
+            hit = step, f"Abertura **{T_SLG_FAULT.lower()}**.\n\n{KV_QUESTION}"
+        elif choice == "none":
+            data.setdefault("fault", {})["curto_previo"] = "sem"
+            data.pop("fault_stage", None)
+            hit = step, f"Abertura **{T_NO_PRIOR_FAULT.lower()}**.\n\n{_EVENT_TAIL}"
+    elif stage == "kv":
+        kv = parse_kv_answer(text)
+        if kv == "outra":
+            hit = _fault_done(step, data, None)
+        elif kv in TELEPROTECTION_KV:
+            data["fault_kv"] = kv
+            data["fault_stage"] = "telep"
+            hit = step, TELEP_QUESTION
+        elif kv:
+            data["fault_kv"] = kv   # kept as typed, even outside the table (no time given)
+            hit = _fault_done(step, data, kv if kv in TABLE_KV else None)
+    elif stage == "telep":
+        telep = parse_teleprotection(text)
+        if telep is not None:
+            hit = _fault_done(step, data, data.get("fault_kv") or TELEPROTECTION_KV[0], telep)
+    if hit is None and data.get("fault_free"):
+        for k in ("fault_free", "fault_stage", "fault_kv"):
+            data.pop(k, None)
+        resume = data.pop("fault_resume", None)
+        if resume:
+            data["fault_stage"] = resume
+    return hit
+
+
+def _ask_fault_times(step, data):
+    """3f: a typed question about fault times → the deterministic voltage question.
+    Bound to a pending short circuit (or a line loss with a single-phase fault); free otherwise."""
+    pending = data.get("event_pending")
+    fault = data.get("fault") or {}
+    bound = step in EVENT_STEPS and (pending == FAULT_EVENT or (
+        pending == LINE_EVENT and fault.get("curto_previo") == "monofasico"))
+    if not bound and not data.get("fault_free"):
+        data["fault_free"] = True
+        if data.get("fault_stage"):
+            data["fault_resume"] = data["fault_stage"]
+    data["fault_stage"] = "kv"
+    return step, KV_QUESTION
+
+
+# ── v6.6.3 (Part 4): AT12 — ONS criteria 2.4.3.7 ─────────────────────────────
+
+_CRIT_NUM_RE = re.compile(r"(?<![\d.,])([1-4])(?![\d.,])")
+_CRIT_FILLER = {"e", "o", "os", "a", "as", "criterio", "criterios", "violado", "violados", "foi", "foram",
+                "ok"}
+
+
+def parse_criteria(text):
+    """'1 e 3' → ([1, 3], note or ''): numbers 1–4 plus the rest of the text as a note
+    when it says more than the numbers."""
+    nums = sorted({int(x) for x in _CRIT_NUM_RE.findall(text or "")})
+    rest = [t for t in norm(_CRIT_NUM_RE.sub(" ", text or "")).split() if t not in _CRIT_FILLER]
+    note = re.sub(r"\s+", " ", text or "").strip()[:300] if len(rest) >= 2 else ""
+    return nums, note
+
+
+def _at12_close(data, status):
+    data["ons_criteria"] = status
+    data.pop("crit_stage", None)
+    head = f"{_AT12_RECORD}\n\n" if status == "violados" else ""
+    return "IDLE", head + closing_summary(data)
+
+
+def _at12_step(data, text):
+    n = norm(text)
+    if data.get("crit_stage") == "which":
+        if n in ("concluir", "concluido", "pronto", "feito", "ok", "terminei"):
+            if not data.get("ons_violated"):
+                return _retry("AT12", data, "Marque pelo menos um critério (1 a 4).")
+            return _at12_close(data, "violados")
+        nums, note = parse_criteria(text)
+        if not nums and is_question(text):
+            return "AT12", None   # free chat, step kept
+        if nums:
+            data["ons_violated"] = sorted(set(data.get("ons_violated") or []) | set(nums))
+        if note or (not nums and len(n) >= 3):
+            data["ons_note"] = note or re.sub(r"\s+", " ", text).strip()[:300]
+            return "AT12", "Observação registrada.\n\n" + _at12_which(data)
+        if nums:
+            return "AT12", _at12_which(data)
+        return _retry("AT12", data, "Não identifiquei o critério.")
+    nums, _ = parse_criteria(text)
+    if n == norm(T_CRIT_SKIP) or _has(n, "pular", "pule", "nao verifiquei", "nao verificar"):
+        return _at12_close(data, "nao_verificados")
+    if n == norm(T_CRIT_VIOLATED) or _has(n, "violado", "violados", "violacao", "algum", "nao") or nums:
+        data["crit_stage"] = "which"
+        if nums:
+            data["ons_violated"] = nums
+        return "AT12", _at12_which(data)
+    if n == norm(T_CRIT_OK) or _has(n, "atendidos", "atendido", "todos", "sim", "ok"):
+        return _at12_close(data, "atendidos")
+    return _unmatched("AT12", data, f"Responda **{T_CRIT_OK}**, **{T_CRIT_VIOLATED}** ou **{T_CRIT_SKIP}**.",
+                      text)
 
 
 def _other_event_note(step, data, text):
@@ -1497,8 +1929,9 @@ _AT5_DMAQ_WORDS = ("dmaq", "dat", "caminho", "path", "pasta", "configurar")
 def intercept(step, data, text):
     """v6.6.2: deterministic answers to TYPED text that must win over the free-chat
     routing of '?' questions (the app calls this first). (new_step, reply) or None.
-      any step     → a question about fault times (4c)
-      AT3          → a pasted '*** ERRO - ANAT01-NNN' (2a)
+      any step     → a question about fault times (v6.6.3: voltage question, Tabela 2)
+      any step     → the answer to the voltage / teleprotection / line-fault question
+      AT3          → a pasted ANAT0 error, read by its description (2a, v6.6.3)
       AT5          → a question about the DMAQ path / DAT line (2b)
       AT9          → 'CDU N … não está / está no DMAQ' (2c)
       AT11 / ATS5  → the description after 'Outro' (4b, answered by the free chat)"""
@@ -1508,14 +1941,17 @@ def intercept(step, data, text):
     n = norm(text)
     if is_end(text) or is_help(text) or is_back(text):
         return None
-    if asks_fault_times(text):
-        q = question(step, data)
-        return step, FAULT_TIMES_TEXT + (f"\n\n---\n\n{q}" if q else "")
+    if asks_fault_times(text):   # v6.6.3 (3f): the voltage question, then Tabela 2
+        return _ask_fault_times(step, data)
+    if data.get("fault_stage"):
+        hit = _fault_step(step, data, text)
+        if hit is not None:
+            return hit
     if step == "AT3":
-        err = parse_anat0_error(text)
-        if err:
+        errs = parse_anat0_errors(text)
+        if errs:
             data["anat0_error"] = True
-            return "AT3", anat0_error_reply(err)
+            return "AT3", anat0_error_reply(errs)
     if step == "AT5" and _has(n, *_AT5_DMAQ_WORDS):
         if not _is_done(n) or is_question(text) or _has(n, "como"):
             return "AT5", at5_dmaq_answer(data)
@@ -1540,6 +1976,8 @@ def handle(step, data, text):
     text = text or ""
     n = norm(text)
 
+    if step == "AT12" and is_end(text):
+        return _at12_close(data, "violados" if data.get("ons_violated") else "nao_verificados")
     if step not in EVENT_STEPS and is_end(text):
         return "IDLE", ENDED_TEXT
     if is_help(text):
@@ -1554,7 +1992,7 @@ def handle(step, data, text):
         elif step == "AT10B":
             prev = data.pop("ctrl_return", "AT10")
         else:
-            prev = _BACK[step]
+            prev = _back_step(step, data)
         return _enter(prev, data, "Voltando um passo.\n\n")
 
     hit = intercept(step, data, text)
@@ -1678,6 +2116,9 @@ def handle(step, data, text):
 
     if step in EVENT_STEPS:
         return _events_step(step, data, text)
+
+    if step == "AT12":
+        return _at12_step(data, text)
 
     if step == "ATS2":
         if data.get("ats2_files") == "guide":

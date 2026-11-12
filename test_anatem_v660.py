@@ -145,14 +145,15 @@ def main_flow_buttons():
     final_data = copy.deepcopy(data())
     srcs.append(last_user_row()["input_source"])
     click(AT.T_END); seen.append(step())
+    click(AT.T_CRIT_SKIP); seen.append(step())                 # v6.6.3: AT12 (ONS criteria)
     return ch, seen, srcs, final_data
 
 
 ch, seen, srcs, fd = main_flow_buttons()
 check("sidebar button starts the ANATEM flow at AT1 (logged as button)", seen[0] == "AT1" and srcs[0] == "button")
-check("buttons/forms walk AT1→AT2→AT3→AT4→AT5→AT6(Incluir, Sim, models)→AT7→AT8→AT9→AT8→AT10→AT11",
+check("buttons/forms walk AT1→AT2→AT3→AT4→AT5→AT6(Incluir, Sim, models)→AT7→AT8→AT9→AT8→AT10→AT11→AT12",
       seen == ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT6", "AT6", "AT7", "AT8", "AT9", "AT9", "AT9", "AT8",
-               "AT10", "AT11", "AT11", "AT11", "AT11", "AT11", "IDLE"], seen)
+               "AT10", "AT11", "AT11", "AT11", "AT11", "AT11", "AT12", "IDLE"], seen)
 check("form answers logged with input_source='form'", srcs[1] == "form" and srcs[2] == "typed", srcs)
 check("captured data: base, .sav, case, DMAQ, equipment, events",
       fd.get("base") == "ONS" and fd.get("sav_name") == "caso_estudo.sav" and fd.get("case_number") == "5"
@@ -181,7 +182,7 @@ def main_flow_typed():
     for t in ["quero passar meu caso para o anatem", "1", "caso_estudo.sav, caso 5", "rodou sem erros",
               "dmaq_anat0.dma", "configurado", "já incluídos", "pronto", "deu erro no CDU",
               "CDU 1042", "está no DMAQ", "regulador de tensão (AVR)", "sem erros", "constante",
-              "curto-circuito na barra 1001", "evento inserido", "encerrar"]:
+              "curto-circuito na barra 1001", "evento inserido", "encerrar", "pular verificação"]:
         run(t)
         seen.append(step())
     return ch, seen
@@ -190,7 +191,7 @@ def main_flow_typed():
 ch2, seen2 = main_flow_typed()
 check("typed answers reach the same steps as the buttons",
       seen2 == ["AT1", "AT2", "AT3", "AT4", "AT5", "AT6", "AT7", "AT8", "AT9", "AT9", "AT9", "AT8",
-                "AT10", "AT11", "AT11", "AT11", "IDLE"], seen2)
+                "AT10", "AT11", "AT11", "AT11", "AT12", "IDLE"], seen2)
 check("typed flow: LLM never ran", not llm_called(ch2))
 
 
@@ -630,8 +631,8 @@ check("'Estudo atual' panel: base, .sav, case, DMAQ (read-only, no ✏️)",
       all(x in panel for x in ["Base: **ONS**", "Arquivo .sav: **caso_estudo.sav**", "Caso: **5**",
                                "DMAQ: **dmaq_anat0.dma**"])
       and not any(e[2] and str(e[2]).startswith("edit_") for e in events("button")))
-check("progress 'Passo 5 de 11 · ANATEM 5: Edição do .stb'",
-      ("progress", 5 / 11, "Passo 5 de 11 · ANATEM 5: Edição do .stb") in EV)
+check("progress 'Passo 5 de 12 · ANATEM 5: Edição do .stb'",
+      ("progress", 5 / 12, "Passo 5 de 12 · ANATEM 5: Edição do .stb") in EV)
 SCRIPT["press"] = {"⏸️ Pausar simulação"}; run(); SCRIPT["press"] = set()
 ps = svc.load_paused_state("userA")
 check("pause: status paused, step/data persisted like the other flows",
@@ -707,10 +708,11 @@ check("DB: sessions.sim_type stores 'ANATEM' and the filter finds it (no schema 
 check("glossary: the 13 ANATEM terms + v6.6.1 DARQ/ULOG and DEVT event codes, pending expert review",
       set(GLOSSARY_ANATEM) == {"ANAT0", "ANATEM", "STB", "DMAQ", "CDU", "DEVT", "DPLT", "DFNT", "flat run",
                                "PLOTCEPEL", "AVR", "GOV", "PSS", "DARQ", "ULOG", "APCB", "APCC", "APCL",
-                               "ABCI", "RMGR", "MDLP", "MDLQ"} and set(GLOSSARY_ANATEM) <= set(ALL_TERMS))
+                               "ABCI", "RMGR", "MDLP", "MDLQ", "Tempo de eliminação de defeito",
+                               "Falha de disjuntor", "Teleproteção"} and set(GLOSSARY_ANATEM) <= set(ALL_TERMS))
 check("glossary matching: ANAT0, DMAQ and '.stb' found in a step message",
       {"ANAT0", "DMAQ", "STB"} <= set(find_terms(AT.question("AT3", {}) + " " + AT.question("AT5", {}))))
-check("APP_VERSION v6.6.2, v6.6.0 DRAFT PT-BR notes kept", APP_VERSION == "v6.6.2"
+check("APP_VERSION v6.6.3, v6.6.0 DRAFT PT-BR notes kept", APP_VERSION == "v6.6.3"
       and "DRAFT" in RELEASE_NOTES["v6.6.0"]["status"] and len(RELEASE_NOTES["v6.6.0"]["o_que_testar"]) == 5)
 start()
 check("welcome message mentions the ANATEM, the rest kept",

@@ -1,9 +1,29 @@
 # Single source of truth for the app version (user sidebar, admin sidebar, feedback rows).
-APP_VERSION = "v6.6.2"
+APP_VERSION = "v6.6.3"
 
 # "Novidades da versão" banner shown once per version per user (users.last_seen_version).
 # PT-BR, user-facing. Entries marked DRAFT must be reviewed before deploy.
 RELEASE_NOTES = {
+    "v6.6.3": {
+        "status": "DRAFT — review before deploy",
+        "novidades": [
+            "Caminho para salvar o caso no ANAREDE corrigido: **Histórico > Operações > Salvar**.",
+            "Erros do ANAT0: o guia lê a **descrição** do erro (o código é só uma referência), mostra "
+            "o que entendeu e indica a correção para erros de potência ativa, de potência reativa e "
+            "de número de unidades. Vários erros colados de uma vez são tratados um a um.",
+            "Eventos de curto-circuito: o guia pergunta a tensão de operação e informa os tempos de "
+            "eliminação de defeito indicativos da Tabela 2 do Submódulo 2.3 dos Procedimentos de Rede "
+            "do ONS (sem e com falha do disjuntor).",
+            "Novo passo de verificação dos resultados pelos critérios do ONS (item 2.4.3.7), depois "
+            "dos eventos.",
+        ],
+        "o_que_testar": [
+            "No passo 3, cole um erro de potência gerada e depois um erro de número de unidades.",
+            "Nos eventos, escolha Curto-circuito e informe 500 kV; repita com 138 kV.",
+            "Informe uma tensão que não está na tabela (ex: 400 kV ou “Outra”).",
+            "Registre pelo menos um evento, clique em Encerrar e responda o passo 12.",
+        ],
+    },
     "v6.6.2": {
         "status": "DRAFT — review before deploy",
         "novidades": [

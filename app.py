@@ -4499,7 +4499,7 @@ with st.sidebar:
         step_label = _step_labels.get(st.session_state.sim_step, "")
         with st.container(border=True):
             st.markdown("**🔬 Estudo atual**" + (f" · {_stype}" if _stype else ""))
-            _n, _m = _si.progress(_stype, st.session_state.sim_step)
+            _n, _m = _si.progress(_stype, st.session_state.sim_step, _sdata)
             if _n:
                 st.progress(_n / _m, text=f"Passo {_n} de {_m} · {step_label}")
             elif step_label:
